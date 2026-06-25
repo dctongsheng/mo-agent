@@ -1,0 +1,194 @@
+"""Constraint validators for evolved artifacts.
+
+Every candidate variant must pass ALL constraints before it can be
+considered valid. Failed constraints = immediate rejection.
+"""
+
+import subprocess
+from pathlib import Path
+from dataclasses import dataclass
+from typing import Optional
+
+from evolution.core.config import EvolutionConfig
+
+
+@dataclass
+class ConstraintResult:
+    """Result of constraint validation."""
+    passed: bool
+    constraint_name: str
+    message: str
+    details: Optional[str] = None
+
+
+class ConstraintValidator:
+    """Validates evolved artifacts against hard constraints."""
+
+    def __init__(self, config: EvolutionConfig):
+        self.config = config
+
+    def validate_all(
+        self,
+        artifact_text: str,
+        artifact_type: str,
+        baseline_text: Optional[str] = None,
+    ) -> list[ConstraintResult]:
+        """Run all applicable constraints. Returns list of results."""
+        results = []
+
+        # 1. Size limits (baseline-aware — an already-large skill isn't
+        #    rejected for its existing size; growth is bounded separately)
+        results.append(self._check_size(artifact_text, artifact_type, baseline_text))
+
+        # 2. Growth limit (if baseline provided)
+        if baseline_text:
+            results.append(self._check_growth(artifact_text, baseline_text, artifact_type))
+
+        # 3. Non-empty
+        results.append(self._check_non_empty(artifact_text))
+
+        # 4. Structural integrity
+        if artifact_type == "skill":
+            results.append(self._check_skill_structure(artifact_text))
+
+        return results
+
+    def run_test_suite(self, hermes_repo: Path) -> ConstraintResult:
+        """Run the full hermes-agent test suite. Must pass 100%."""
+        try:
+            result = subprocess.run(
+                ["python", "-m", "pytest", "tests/", "-q", "--tb=no"],
+                capture_output=True,
+                text=True,
+                timeout=300,
+                cwd=str(hermes_repo),
+            )
+
+            if result.returncode == 0:
+                return ConstraintResult(
+                    passed=True,
+                    constraint_name="test_suite",
+                    message="All tests passed",
+                    details=result.stdout.strip().split("\n")[-1] if result.stdout else "",
+                )
+            else:
+                # Extract failure summary
+                last_lines = result.stdout.strip().split("\n")[-5:] if result.stdout else []
+                return ConstraintResult(
+                    passed=False,
+                    constraint_name="test_suite",
+                    message="Test suite failed",
+                    details="\n".join(last_lines),
+                )
+        except subprocess.TimeoutExpired:
+            return ConstraintResult(
+                passed=False,
+                constraint_name="test_suite",
+                message="Test suite timed out (300s)",
+            )
+        except Exception as e:
+            return ConstraintResult(
+                passed=False,
+                constraint_name="test_suite",
+                message=f"Failed to run tests: {e}",
+            )
+
+    def _check_size(self, text: str, artifact_type: str, baseline_text: Optional[str] = None) -> ConstraintResult:
+        size = len(text)
+        if artifact_type == "skill":
+            limit = self.config.max_skill_size
+        elif artifact_type == "tool_description":
+            limit = self.config.max_tool_desc_size
+        elif artifact_type == "param_description":
+            limit = self.config.max_param_desc_size
+        else:
+            limit = self.config.max_skill_size  # Default
+
+        # Baseline-aware: a skill that was already larger than the absolute cap
+        # shouldn't be rejected just for its existing size — the separate
+        # growth_limit already bounds expansion. Raise the cap to the baseline
+        # plus the allowed growth margin so the two constraints never conflict.
+        if baseline_text:
+            limit = max(limit, int(len(baseline_text) * (1 + getattr(self.config, "max_prompt_growth", 0.2))))
+
+        if size <= limit:
+            return ConstraintResult(
+                passed=True,
+                constraint_name="size_limit",
+                message=f"Size OK: {size}/{limit} chars",
+            )
+        else:
+            return ConstraintResult(
+                passed=False,
+                constraint_name="size_limit",
+                message=f"Size exceeded: {size}/{limit} chars ({size - limit} over)",
+            )
+
+    def _check_growth(self, text: str, baseline: str, artifact_type: str) -> ConstraintResult:
+        base_len = len(baseline)
+        new_len = len(text)
+        growth = (new_len - base_len) / max(1, base_len)
+        max_growth = self.config.max_prompt_growth
+
+        # Percentage caps are meaningless for tiny baselines: +20% of a 1.9KB
+        # skill is ~385 chars — far too little for GEPA to restructure it. Let a
+        # small skill grow up to an absolute grace size even if that exceeds the
+        # percentage; the separate (baseline-aware) size_limit still caps the
+        # absolute ceiling, so it can be reworked but never balloon past cap.
+        pct_len = int(base_len * (1 + max_growth))
+        grace = getattr(self.config, "small_skill_grace_size", 0) if artifact_type == "skill" else 0
+        allowed_len = max(pct_len, grace)
+
+        if new_len <= allowed_len:
+            basis = "grace" if new_len > pct_len else f"max {max_growth:+.0%}"
+            return ConstraintResult(
+                passed=True,
+                constraint_name="growth_limit",
+                message=f"Growth OK: {growth:+.1%} ({new_len}/{allowed_len} chars, {basis})",
+            )
+        else:
+            return ConstraintResult(
+                passed=False,
+                constraint_name="growth_limit",
+                message=f"Growth exceeded: {growth:+.1%} ({new_len}/{allowed_len} chars allowed)",
+            )
+
+    def _check_non_empty(self, text: str) -> ConstraintResult:
+        if text.strip():
+            return ConstraintResult(
+                passed=True,
+                constraint_name="non_empty",
+                message="Artifact is non-empty",
+            )
+        else:
+            return ConstraintResult(
+                passed=False,
+                constraint_name="non_empty",
+                message="Artifact is empty",
+            )
+
+    def _check_skill_structure(self, text: str) -> ConstraintResult:
+        """Check that a skill file has valid YAML frontmatter and markdown body."""
+        has_frontmatter = text.strip().startswith("---")
+        has_name = "name:" in text[:500] if has_frontmatter else False
+        has_description = "description:" in text[:500] if has_frontmatter else False
+
+        if has_frontmatter and has_name and has_description:
+            return ConstraintResult(
+                passed=True,
+                constraint_name="skill_structure",
+                message="Skill has valid frontmatter (name + description)",
+            )
+        else:
+            missing = []
+            if not has_frontmatter:
+                missing.append("YAML frontmatter (---)")
+            if not has_name:
+                missing.append("name field")
+            if not has_description:
+                missing.append("description field")
+            return ConstraintResult(
+                passed=False,
+                constraint_name="skill_structure",
+                message=f"Skill missing: {', '.join(missing)}",
+            )

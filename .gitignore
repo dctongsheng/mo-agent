@@ -1,0 +1,37 @@
+# Dependencies
+node_modules/
+**/node_modules/
+*.venv/
+.venv/
+venv/
+hermes-venv/
+
+# Build output
+app/dist/
+app/src/renderer/dist/
+app/release/
+dist/
+build/
+*.asar
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Runtime / local state
+.env
+.env.local
+*.log
+.DS_Store
+
+# Editor
+.idea/
+.vscode/
+*.swp
+
+# Local agent / IDE state
+.claude/

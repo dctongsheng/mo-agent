@@ -1,0 +1,304 @@
+import React, { useEffect, useState, useCallback } from "react";
+import { useAppSelector } from "../../store/hooks";
+import { moPortOf } from "../../store/slices/gatewaySlice";
+import { useAppState } from "../appState";
+import { TapeCard } from "../components/TapeCard";
+import { ModelEvolve } from "./ModelEvolve";
+import {
+  getEvolveStatus, listEvolveSkills, runEvolve, listEvolveRuns, getEvolveRun,
+  acceptEvolveRun, rejectEvolveRun, getEvolveSchedule, setEvolveSchedule, getEvolveRunLog,
+  EvolveStatus, EvolveSkill, EvolveRun, EvolveRunDetail, EvolveSchedule,
+} from "../../services/mo-api";
+
+function fmt(ts?: number): string {
+  if (!ts) return "";
+  const d = new Date(ts * 1000);
+  return `${d.getMonth() + 1}/${String(d.getDate()).padStart(2, "0")} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
+
+const STATUS_LABEL: Record<string, string> = {
+  running: "进化中…", done: "待审", failed: "失败", accepted: "已采纳", rejected: "已弃用",
+};
+const STATUS_COLOR: Record<string, string> = {
+  running: "var(--moon)", done: "var(--indigo)", failed: "var(--seal)",
+  accepted: "var(--moss)", rejected: "var(--ink-3)",
+};
+
+/** Harness 自进化 · 技艺 — drives the GEPA skill-evolution pipeline. */
+export function HarnessEvolve() {
+  const moPort = useAppSelector((s) => moPortOf(s.gateway.state));
+  const s = useAppState();
+  const [status, setStatus] = useState<EvolveStatus | null>(null);
+  const [skills, setSkills] = useState<EvolveSkill[]>([]);
+  const [runs, setRuns] = useState<EvolveRun[]>([]);
+  const [skill, setSkill] = useState("");
+  const [iterations, setIterations] = useState(4);
+  const [busy, setBusy] = useState(false);
+  const [openRun, setOpenRun] = useState<EvolveRunDetail | null>(null);
+  const [sched, setSched] = useState<EvolveSchedule | null>(null);
+  const [includeBuiltin, setIncludeBuiltin] = useState(false);
+  const [logRun, setLogRun] = useState<EvolveRun | null>(null);
+  const [logText, setLogText] = useState("");
+
+  // Built-in Hermes skills are hidden by default; flip the toggle to evolve them.
+  const visibleSkills = includeBuiltin ? skills : skills.filter((s) => !s.builtin);
+  const customCount = skills.filter((s) => !s.builtin).length;
+
+  const refresh = useCallback(() => {
+    if (!moPort) return;
+    getEvolveStatus(moPort).then(setStatus).catch(() => {});
+    listEvolveSkills(moPort).then((r) => setSkills(r.data)).catch(() => {});
+    listEvolveRuns(moPort).then((r) => setRuns(r.data)).catch(() => {});
+    getEvolveSchedule(moPort).then(setSched).catch(() => {});
+  }, [moPort]);
+
+  useEffect(() => { refresh(); }, [refresh]);
+
+  // Keep the selected skill valid for the current visible list.
+  useEffect(() => {
+    if (visibleSkills.length === 0) { setSkill(""); return; }
+    if (!visibleSkills.some((s) => s.name === skill)) setSkill(visibleSkills[0].name);
+  }, [visibleSkills, skill]);
+
+  // Poll while any run is in flight
+  useEffect(() => {
+    if (!moPort) return;
+    const anyRunning = runs.some((r) => r.status === "running");
+    if (!anyRunning) return;
+    const t = setInterval(() => {
+      listEvolveRuns(moPort).then((r) => setRuns(r.data)).catch(() => {});
+    }, 4000);
+    return () => clearInterval(t);
+  }, [moPort, runs]);
+
+  const start = () => {
+    if (!moPort || !skill || busy) return;
+    setBusy(true);
+    runEvolve(moPort, skill, iterations).then((r) => {
+      if (!r.ok) alert(`进化引擎未就绪：${r.reason ?? "未知原因"}`);
+      setTimeout(refresh, 500);
+    }).catch(() => {}).finally(() => setBusy(false));
+  };
+
+  const open = (id: string) => {
+    if (!moPort) return;
+    getEvolveRun(moPort, id).then(setOpenRun).catch(() => {});
+  };
+
+  const openLog = (run: EvolveRun) => {
+    if (!moPort) return;
+    setLogRun(run);
+    setLogText("加载中…");
+    getEvolveRunLog(moPort, run.id).then((r) => setLogText(r.data || "(日志为空)")).catch(() => setLogText("(日志读取失败)"));
+  };
+
+  // Live-tail the log while its run is still in flight.
+  useEffect(() => {
+    if (!moPort || !logRun) return;
+    const live = runs.find((r) => r.id === logRun.id)?.status === "running" || logRun.status === "running";
+    if (!live) return;
+    const t = setInterval(() => {
+      getEvolveRunLog(moPort, logRun.id).then((r) => setLogText(r.data || "(日志为空)")).catch(() => {});
+    }, 3000);
+    return () => clearInterval(t);
+  }, [moPort, logRun, runs]);
+
+  const accept = (id: string) => {
+    if (!moPort) return;
+    acceptEvolveRun(moPort, id).then(() => { setOpenRun(null); refresh(); }).catch(() => {});
+  };
+  const reject = (id: string) => {
+    if (!moPort) return;
+    rejectEvolveRun(moPort, id).then(() => { setOpenRun(null); refresh(); }).catch(() => {});
+  };
+
+  const saveSched = (patch: Partial<EvolveSchedule>) => {
+    if (!moPort || !sched) return;
+    const next = { ...sched, ...patch };
+    setSched(next);
+    setEvolveSchedule(moPort, next).catch(() => {});
+  };
+
+  return (
+    <div style={{ marginTop: 48 }}>
+      <div style={{ display: "flex", alignItems: "baseline", gap: 10, marginBottom: 6 }}>
+        <span style={{ fontSize: 11, letterSpacing: "0.2em", color: "var(--seal)", fontFamily: "'JetBrains Mono', monospace" }}>HARNESS · 技艺自进化</span>
+        {status && (
+          <span style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 10.5, fontFamily: "'JetBrains Mono', monospace", color: status.ready ? "var(--moss)" : "var(--moon)", border: `1px solid ${status.ready ? "var(--moss)" : "var(--moon)"}`, borderRadius: 99, padding: "2px 9px" }}>
+            <span style={{ width: 6, height: 6, borderRadius: 99, background: "currentColor" }} />
+            {status.ready ? "引擎就绪 · GEPA" : `未就绪 · ${status.reason}`}
+          </span>
+        )}
+      </div>
+      <h2 style={{ margin: "8px 0 6px", fontFamily: "'Noto Serif SC', serif", fontSize: 21, fontWeight: 650 }}>夜貘会把自己的技艺,练得更趁手。</h2>
+      <p style={{ margin: 0, fontSize: 13.5, lineHeight: 1.7, color: "var(--ink-2)", maxWidth: 640 }}>
+        交给「分身·夜貘（进化）」:它用 GEPA 优化器反复打磨某个技能的 SKILL.md,生成候选先进暂存区。你看过 diff、点「采纳」,才会真正写回。
+      </p>
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 26, marginTop: 26, alignItems: "start" }}>
+        {/* Run + schedule controls */}
+        <TapeCard tapeLeft={true} tapeRotate="2deg" style={{ padding: "22px 24px" }}>
+          <div style={{ fontFamily: "'Noto Serif SC', serif", fontSize: 16, fontWeight: 650, marginBottom: 14 }}>立即进化一次</div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+            <label style={lbl}>选一项技艺
+              {visibleSkills.length > 0 ? (
+                <select value={skill} onChange={(e) => setSkill(e.target.value)} style={sel}>
+                  {visibleSkills.map((sk) => (
+                    <option key={sk.name} value={sk.name}>{sk.name}{sk.builtin ? " · 内置" : ""} · {Math.round(sk.size / 100) / 10}k</option>
+                  ))}
+                </select>
+              ) : (
+                <div style={{ ...sel, display: "flex", alignItems: "center", color: "var(--ink-3)" }}>暂无自定义技艺</div>
+              )}
+            </label>
+            <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, color: "var(--ink-2)", cursor: "pointer" }}>
+              <input type="checkbox" checked={includeBuiltin} onChange={(e) => setIncludeBuiltin(e.target.checked)} />
+              包含内置技艺{!includeBuiltin && customCount === 0 ? "（勾选后可进化内置技艺）" : ""}
+            </label>
+            <label style={lbl}>迭代次数 · {iterations}
+              <input type="range" min={1} max={12} value={iterations} onChange={(e) => setIterations(Number(e.target.value))} style={{ width: "100%" }} />
+            </label>
+            <button onClick={start} disabled={busy || !skill || !(status?.ready)} style={{
+              height: 40, borderRadius: 9, border: "none",
+              background: (busy || !status?.ready) ? "var(--line)" : "var(--seal)",
+              color: "oklch(98% 0.01 85)", fontSize: 14, fontWeight: 600,
+              cursor: (busy || !status?.ready) ? "default" : "pointer", fontFamily: "'Noto Serif SC', serif",
+            }}>{busy ? "启动中…" : "立即进化一次 →"}</button>
+            <div style={{ fontSize: 11, color: "var(--ink-3)", lineHeight: 1.6 }}>
+              评测走 {status?.eval_model ?? "qwen"};迭代越多越慢越准。一次约数分钟。
+            </div>
+          </div>
+
+          <div style={{ borderTop: "1px dashed var(--line)", marginTop: 18, paddingTop: 14 }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+              <span style={{ fontSize: 13.5, fontWeight: 600 }}>夜间自动进化</span>
+              <button onClick={() => saveSched({ enabled: !sched?.enabled })} style={{
+                width: 44, height: 24, borderRadius: 99, border: "none", cursor: "pointer", position: "relative",
+                background: sched?.enabled ? "var(--moss)" : "var(--line-2)", transition: "background .2s",
+              }}>
+                <span style={{ position: "absolute", top: 3, left: sched?.enabled ? 23 : 3, width: 18, height: 18, borderRadius: 99, background: "#fff", transition: "left .2s" }} />
+              </button>
+            </div>
+            {sched?.enabled && (
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 10, fontSize: 12.5, color: "var(--ink-2)" }}>
+                每天
+                <input type="number" min={0} max={23} value={sched.hour} onChange={(e) => saveSched({ hour: Number(e.target.value) })} style={numIn} />:
+                <input type="number" min={0} max={59} value={sched.minute} onChange={(e) => saveSched({ minute: Number(e.target.value) })} style={numIn} />
+                · 自动挑一项技艺打磨
+              </div>
+            )}
+          </div>
+        </TapeCard>
+
+        {/* Runs list */}
+        <TapeCard tapeLeft={false} tapeRotate="-2deg" style={{ padding: "22px 24px" }}>
+          <div style={{ fontFamily: "'Noto Serif SC', serif", fontSize: 16, fontWeight: 650, marginBottom: 12 }}>蜕皮记录 · 待审与历史</div>
+          {runs.length === 0 && <div style={{ fontSize: 13, color: "var(--ink-3)" }}>还没有进化记录。选一项技艺,试一次。</div>}
+          <div style={{ display: "flex", flexDirection: "column", gap: 8, maxHeight: 320, overflowY: "auto" }}>
+            {runs.map((r) => (
+              <div key={r.id} onClick={() => r.status !== "running" && open(r.id)} style={{
+                display: "flex", alignItems: "center", gap: 10, padding: "10px 12px",
+                border: "1px solid var(--line)", borderRadius: 8,
+                cursor: r.status === "running" ? "default" : "pointer", background: "var(--card)",
+              }}>
+                <span style={{ width: 7, height: 7, borderRadius: 99, background: STATUS_COLOR[r.status], flexShrink: 0, ...(r.status === "running" ? { animation: "breathe 1.4s ease-in-out infinite" } : {}) }} />
+                <span style={{ flex: 1, fontSize: 13, fontFamily: "'JetBrains Mono', monospace", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{r.skill}</span>
+                <span style={{ fontSize: 11, color: STATUS_COLOR[r.status] }}>{STATUS_LABEL[r.status]}</span>
+                <button
+                  onClick={(e) => { e.stopPropagation(); openLog(r); }}
+                  style={{ flexShrink: 0, border: "1px solid var(--line-2)", background: "transparent", color: "var(--ink-2)", borderRadius: 6, fontSize: 11, padding: "2px 8px", cursor: "pointer" }}
+                >日志</button>
+                <span style={{ fontSize: 11, color: "var(--ink-3)", flexShrink: 0 }}>{fmt(r.created_at)}</span>
+              </div>
+            ))}
+          </div>
+        </TapeCard>
+      </div>
+
+      {/* Model self-evolution (part 2): weight fine-tuning */}
+      <ModelEvolve onGoSettings={() => s.go("settings")} />
+
+      {/* Diff modal */}
+      {openRun && (
+        <div onClick={() => setOpenRun(null)} style={{
+          position: "fixed", inset: 0, background: "oklch(20% 0.02 60 / 0.45)",
+          display: "flex", alignItems: "center", justifyContent: "center", zIndex: 50, padding: 40,
+        }}>
+          <div onClick={(e) => e.stopPropagation()} style={{
+            background: "var(--card)", borderRadius: 12, boxShadow: "var(--shadow)",
+            width: "min(860px, 92vw)", maxHeight: "86vh", display: "flex", flexDirection: "column",
+            border: "1px solid var(--line)",
+          }}>
+            <div style={{ padding: "18px 22px", borderBottom: "1px solid var(--line)", display: "flex", alignItems: "baseline", gap: 12 }}>
+              <span style={{ fontFamily: "'Noto Serif SC', serif", fontSize: 17, fontWeight: 650 }}>{openRun.skill}</span>
+              <span style={{ fontSize: 11, color: STATUS_COLOR[openRun.status] }}>{STATUS_LABEL[openRun.status]}</span>
+              {openRun.metrics?.improvement != null && (
+                <span style={{ fontSize: 12, fontFamily: "'JetBrains Mono', monospace", color: openRun.metrics.improvement > 0 ? "var(--moss)" : "var(--seal)" }}>
+                  {openRun.metrics.baseline_score?.toFixed(3)} → {openRun.metrics.evolved_score?.toFixed(3)} ({openRun.metrics.improvement > 0 ? "+" : ""}{openRun.metrics.improvement.toFixed(3)})
+                </span>
+              )}
+              <span style={{ marginLeft: "auto", cursor: "pointer", color: "var(--ink-3)", fontSize: 18 }} onClick={() => setOpenRun(null)}>×</span>
+            </div>
+            <div style={{ flex: 1, overflowY: "auto", padding: "16px 22px" }}>
+              {openRun.error && <div style={{ color: "var(--seal)", fontSize: 13, marginBottom: 12 }}>错误：{openRun.error}</div>}
+              {openRun.diff ? (
+                <pre style={{ margin: 0, fontFamily: "'JetBrains Mono', monospace", fontSize: 12, lineHeight: 1.6, whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
+                  {openRun.diff.split("\n").map((ln, i) => (
+                    <div key={i} style={{
+                      color: ln.startsWith("+") && !ln.startsWith("+++") ? "var(--moss)"
+                        : ln.startsWith("-") && !ln.startsWith("---") ? "var(--seal)"
+                        : ln.startsWith("@@") ? "var(--indigo)" : "var(--ink-2)",
+                      background: ln.startsWith("+") && !ln.startsWith("+++") ? "var(--moss-soft)"
+                        : ln.startsWith("-") && !ln.startsWith("---") ? "var(--seal-soft)" : "transparent",
+                    }}>{ln || " "}</div>
+                  ))}
+                </pre>
+              ) : (
+                <div style={{ fontSize: 13, color: "var(--ink-3)" }}>没有可显示的差异（可能进化未改动正文,或运行失败）。</div>
+              )}
+            </div>
+            <div style={{ padding: "14px 22px", borderTop: "1px solid var(--line)", display: "flex", gap: 12, alignItems: "center" }}>
+              <button onClick={() => openLog(openRun)} style={{ height: 38, padding: "0 16px", borderRadius: 9, border: "1px solid var(--line-2)", background: "transparent", color: "var(--ink-2)", fontSize: 13, cursor: "pointer" }}>查看日志</button>
+              {openRun.status === "done" && (
+                <div style={{ marginLeft: "auto", display: "flex", gap: 12 }}>
+                  <button onClick={() => reject(openRun.id)} style={{ height: 38, padding: "0 18px", borderRadius: 9, border: "1px solid var(--line-2)", background: "transparent", color: "var(--ink-2)", fontSize: 13, cursor: "pointer" }}>弃用</button>
+                  <button onClick={() => accept(openRun.id)} style={{ height: 38, padding: "0 20px", borderRadius: 9, border: "none", background: "var(--seal)", color: "oklch(98% 0.01 85)", fontSize: 13.5, fontWeight: 600, cursor: "pointer", fontFamily: "'Noto Serif SC', serif" }}>采纳 · 写回技艺</button>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Log modal */}
+      {logRun && (
+        <div onClick={() => setLogRun(null)} style={{
+          position: "fixed", inset: 0, background: "oklch(20% 0.02 60 / 0.45)",
+          display: "flex", alignItems: "center", justifyContent: "center", zIndex: 51, padding: 40,
+        }}>
+          <div onClick={(e) => e.stopPropagation()} style={{
+            background: "var(--card)", borderRadius: 12, boxShadow: "var(--shadow)",
+            width: "min(900px, 94vw)", maxHeight: "86vh", display: "flex", flexDirection: "column",
+            border: "1px solid var(--line)",
+          }}>
+            <div style={{ padding: "16px 22px", borderBottom: "1px solid var(--line)", display: "flex", alignItems: "center", gap: 12 }}>
+              <span style={{ fontFamily: "'Noto Serif SC', serif", fontSize: 16, fontWeight: 650 }}>进化日志 · {logRun.skill}</span>
+              {(runs.find((r) => r.id === logRun.id)?.status ?? logRun.status) === "running" && (
+                <span style={{ fontSize: 11, color: "var(--moon)" }}>● 实时刷新中</span>
+              )}
+              <button onClick={() => openLog(logRun)} style={{ marginLeft: "auto", border: "1px solid var(--line-2)", background: "transparent", color: "var(--ink-2)", borderRadius: 6, fontSize: 12, padding: "3px 10px", cursor: "pointer" }}>刷新</button>
+              <span style={{ cursor: "pointer", color: "var(--ink-3)", fontSize: 18 }} onClick={() => setLogRun(null)}>×</span>
+            </div>
+            <div ref={(el) => { if (el) el.scrollTop = el.scrollHeight; }} style={{ flex: 1, overflowY: "auto", padding: "14px 20px", background: "var(--bg-2)" }}>
+              <pre style={{ margin: 0, fontFamily: "'JetBrains Mono', monospace", fontSize: 11.5, lineHeight: 1.55, whiteSpace: "pre-wrap", wordBreak: "break-word", color: "var(--ink-2)" }}>{logText}</pre>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+const lbl: React.CSSProperties = { fontSize: 12, color: "var(--ink-3)", display: "flex", flexDirection: "column", gap: 6 };
+const sel: React.CSSProperties = { height: 36, borderRadius: 8, border: "1px solid var(--line-2)", background: "var(--bg-2)", color: "var(--ink)", fontSize: 13, padding: "0 10px", fontFamily: "'JetBrains Mono', monospace" };
+const numIn: React.CSSProperties = { width: 48, height: 30, borderRadius: 7, border: "1px solid var(--line-2)", background: "var(--bg-2)", color: "var(--ink)", fontSize: 13, textAlign: "center", fontFamily: "'JetBrains Mono', monospace" };

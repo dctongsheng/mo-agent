@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  app:
+    name: Desktop app — typecheck & build
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - run: npm ci
+      - name: Typecheck (main process)
+        run: npx tsc -p tsconfig.main.json --noEmit
+      - name: Build (main + renderer)
+        run: npm run build:all
+
+  engine:
+    name: Self-evolution engine — import smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Import GEPA engine
+        run: |
+          python -c "import sys; sys.path.insert(0, 'server/vendor'); \
+            from evolution.core.config import EvolutionConfig; \
+            from evolution.core.constraints import ConstraintValidator; \
+            print('evolution engine OK')"

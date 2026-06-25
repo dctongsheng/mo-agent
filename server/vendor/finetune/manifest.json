@@ -1,0 +1,15 @@
+{
+  "name": "mint-lora-training",
+  "version": "1.0.0",
+  "category": "AI Training / Fine-Tuning",
+  "description": "Cloud-hosted MinT LoRA fine-tuning workflows for SFT, DPO, GRPO, evaluation, adapter download, and token quota checks.",
+  "homepage": "https://github.com/Taiyi-AI-Lab/AI-Workflow-Skills/tree/main/skills/mint-lora-training",
+  "compat": [
+    "claude-code",
+    "claude-ai",
+    "cursor",
+    "codex-cli",
+    "gemini-cli",
+    "opencode"
+  ]
+}
