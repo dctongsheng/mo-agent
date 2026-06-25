@@ -1554,13 +1554,14 @@ def _start_dashboard_in_thread(port: int) -> None:
         )
 
     if not WEB_DIST.exists():
-        # The desktop app ships its own UI and only needs the dashboard's API
-        # routes (/api/mo/*, /api/model/*, …). Start the server even without the
-        # bundled web frontend — web_server.py serves a 404 for the SPA path in
-        # that case, while every API route keeps working.
-        logging.getLogger("hermes.desktop").info(
-            "Dashboard frontend not bundled (%s); starting API-only.", WEB_DIST
+        # The dashboard hosts the Mo API routes (/api/mo/*, /api/model/*) AND
+        # the SPA. The Electron app classifies its gateway ports by fetching
+        # /health, which falls through to the SPA (index.html) — so the bundled
+        # web frontend must be present for the renderer to find this port.
+        logging.getLogger("hermes.desktop").warning(
+            "Dashboard assets missing (%s) — dashboard will not start", WEB_DIST
         )
+        return
 
     config = uvicorn.Config(
         dashboard_app,

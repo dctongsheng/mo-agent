@@ -35,3 +35,5 @@ __pycache__/
 
 # Local agent / IDE state
 .claude/
+node_modules
+app/node_modules
