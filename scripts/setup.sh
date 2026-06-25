@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# Mo — one-time development setup.
+# Installs the desktop app's Node dependencies and creates a Python virtualenv
+# for the vendored Hermes Agent core.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+
+echo "==> Mo setup ($ROOT)"
+
+# --- Node / app deps --------------------------------------------------------
+if ! command -v npm >/dev/null 2>&1; then
+  echo "ERROR: npm not found. Install Node.js >= 18 first." >&2
+  exit 1
+fi
+echo "==> Installing app dependencies (npm)…"
+( cd app && npm install )
+
+# --- Python venv for the vendored core --------------------------------------
+PY="${PYTHON:-python3.11}"
+if ! command -v "$PY" >/dev/null 2>&1; then
+  PY="python3"
+fi
+echo "==> Creating Python venv at vendor/hermes-agent/.venv ($PY)…"
+( cd vendor/hermes-agent
+  "$PY" -m venv .venv
+  ./.venv/bin/pip install --upgrade pip >/dev/null
+  echo "==> Installing Hermes Agent core (pip install -e)…"
+  ./.venv/bin/pip install -e .
+)
+
+cat <<'DONE'
+
+==> Done.
+
+Next steps:
+  1. Copy the env template:   cp .env.example ~/.hermes-mo/.env   (then fill in keys)
+  2. Configure your model in  ~/.hermes-mo/config.yaml             (see docs/configuration.md)
+  3. Launch the app:          cd app && npm run dev
+DONE

@@ -2,6 +2,17 @@
   "name": "mo-desktop",
   "version": "0.1.0",
   "description": "Mo · 桌面端自进化 Agent — a desktop self-evolving agent, powered by the Hermes Agent core (Nous Research, MIT)",
+  "license": "MIT",
+  "author": "Taiyi-AI-Lab",
+  "homepage": "https://github.com/Taiyi-AI-Lab/mo-agent#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Taiyi-AI-Lab/mo-agent.git",
+    "directory": "app"
+  },
+  "bugs": {
+    "url": "https://github.com/Taiyi-AI-Lab/mo-agent/issues"
+  },
   "main": "dist/main/main.js",
   "private": true,
   "scripts": {

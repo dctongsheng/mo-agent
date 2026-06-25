@@ -70,17 +70,11 @@ See [docs/architecture.md](docs/architecture.md) and [docs/self-evolution.md](do
 **Run in development**
 
 ```bash
-# 1. Install desktop app dependencies
+# 1. One-time setup: app deps + Python venv for the vendored core
+./scripts/setup.sh
+
+# 2. Launch the app (builds main + renderer, then starts Electron)
 cd app
-npm install
-
-# 2. (first time) create a Python venv for the vendored core and install deps
-cd ../vendor/hermes-agent
-python3.11 -m venv .venv
-./.venv/bin/pip install -e .        # or: pip install -r requirements.txt
-
-# 3. Launch the app (builds main + renderer, then starts Electron)
-cd ../../app
 npm run dev
 ```
 
@@ -96,6 +90,14 @@ npm run dist:local   # unsigned local build → app/release/
 ```
 
 Packaging bundles `server/` and `vendor/hermes-agent/` into the app's resources.
+
+## Status
+
+**Alpha**, macOS (Apple Silicon) only for now. APIs and layout may change. Issues and PRs welcome.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for project layout and development setup, and [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md). Notable changes are tracked in [CHANGELOG.md](CHANGELOG.md).
 
 ## Licensing
 
