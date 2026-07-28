@@ -11,8 +11,7 @@ mo-agent/
 ├── server/                  # Python gateway (your code)
 │   ├── mo-gateway.py        # entry point: boots Hermes gateway + mounts /api/mo/*
 │   └── vendor/
-│       ├── evolution/       # GEPA self-evolution engine
-│       └── finetune/        # fine-tuning dataset/runner scaffold
+│       └── evolution/       # GEPA self-evolution engine (Nous Research, MIT)
 └── vendor/hermes-agent/     # vendored Hermes Agent core (Nous Research, MIT)
 ```
 
@@ -35,7 +34,7 @@ The renderer talks to the gateway over `http://127.0.0.1:<port>` using a per-boo
 | Self-evolution | `/api/mo/evolve/{run,runs,status,skills,schedule}` and `runs/{id}/{accept,reject,log}` |
 | Endpoint library | `/api/mo/endpoints…` — register a provider once, reuse across scenarios |
 | Model config | `/api/mo/models/{embedding,evolve}` — pick models per scenario |
-| Fine-tuning | `/api/mo/finetune/{config,gen-dataset,status}` |
+| Fine-tuning | `/api/mo/finetune/{config,gen-dataset,status}` — scaffold only; the cloud-training scripts are not bundled |
 | Local models | `/api/mo/local/*` — Ollama integration |
 
 It also installs a small runtime patch that skips semantic memory recall for very short messages (a bare "hi" gains nothing from a vector search), tunable via `MO_RECALL_MIN_CHARS`.
