@@ -64,4 +64,4 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   skills, conference LaTeX templates, licensed fonts) is stripped for MIT
   compliance — see `THIRD_PARTY_LICENSES/`.
 
-[Unreleased]: https://github.com/Taiyi-AI-Lab/mo-agent
+[Unreleased]: https://github.com/dctongsheng/mo-agent

@@ -1,11 +1,11 @@
 blank_issues_enabled: true
 contact_links:
   - name: 🔒 Security vulnerability
-    url: https://github.com/Taiyi-AI-Lab/mo-agent/security/advisories/new
+    url: https://github.com/dctongsheng/mo-agent/security/advisories/new
     about: Report privately via GitHub Security Advisories — please do not open a public issue.
   - name: 🧩 Hermes Agent core issue
     url: https://github.com/NousResearch/hermes-agent/issues
     about: Mo vendors the Hermes core. Bugs in the runtime, tool loop or memory plugins belong upstream.
   - name: 💬 Questions & ideas
-    url: https://github.com/Taiyi-AI-Lab/mo-agent/discussions
+    url: https://github.com/dctongsheng/mo-agent/discussions
     about: Setup help, model/provider questions, and feature brainstorming.

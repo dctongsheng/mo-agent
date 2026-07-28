@@ -16,7 +16,7 @@ fixes. There are no maintained release branches yet.
 
 Report privately through GitHub's coordinated disclosure flow:
 
-1. Go to the [Security tab](https://github.com/Taiyi-AI-Lab/mo-agent/security/advisories/new)
+1. Go to the [Security tab](https://github.com/dctongsheng/mo-agent/security/advisories/new)
    of this repository.
 2. Click **Report a vulnerability** and describe the issue.
 
