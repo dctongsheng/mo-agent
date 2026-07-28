@@ -39,8 +39,14 @@ jobs:
       # dependency — scripts/setup.sh installs it separately. Install it here too,
       # otherwise this job silently only proves that the two dspy-free modules
       # import, which is what previously let a broken feature ship green.
+      # dspy is a hard runtime dependency of the GEPA engine and is NOT a Hermes
+      # dependency — scripts/setup.sh installs it separately. rich and click are
+      # Hermes deps (rich==14.3.3 in its pyproject), so a real install gets them
+      # for free; this job installs the core's dependencies, not the core, so it
+      # has to name them. Without these the job only proves the two dspy-free
+      # modules import, which is what previously let a broken feature ship green.
       - name: Install engine dependencies
-        run: pip install "dspy>=3.2"
+        run: pip install "dspy>=3.2" "rich" "click"
       - name: Import GEPA engine (real entry points)
         run: |
           python -c "import sys; sys.path.insert(0, 'server/vendor'); \

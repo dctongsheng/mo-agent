@@ -12,12 +12,13 @@
     "skipLibCheck": true,
     "resolveJsonModule": true,
     "isolatedModules": true,
-    "baseUrl": "src/renderer",
+    // Relative paths and no baseUrl: newer TypeScript rejects non-relative
+    // entries here (TS5090). Mirrors the aliases in src/renderer/vite.config.ts.
     "paths": {
-      "@store/*": ["store/*"],
-      "@ui/*": ["ui/*"],
-      "@services/*": ["services/*"],
-      "@styles/*": ["styles/*"]
+      "@store/*": ["./src/renderer/store/*"],
+      "@ui/*": ["./src/renderer/ui/*"],
+      "@services/*": ["./src/renderer/services/*"],
+      "@styles/*": ["./src/renderer/styles/*"]
     }
   },
   "include": ["src/renderer/**/*"],
