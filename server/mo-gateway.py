@@ -1619,7 +1619,6 @@ def main() -> None:
     os.environ["API_SERVER_ENABLED"] = "true"
     os.environ["API_SERVER_PORT"] = str(gateway_port)
     os.environ["API_SERVER_HOST"] = "127.0.0.1"
-    os.environ.setdefault("API_SERVER_CORS_ORIGINS", "*")
     os.environ["HERMES_DESKTOP_MODE"] = "1"
 
     # Announce the API port to Electron main process (read by python-bridge.ts)
@@ -1628,6 +1627,25 @@ def main() -> None:
     _start_dashboard_in_thread(dashboard_port)
 
     from gateway.run import start_gateway
+
+    # Importing gateway.run re-runs load_hermes_dotenv, which *deliberately*
+    # overrides already-set variables with whatever is in ~/.hermes-mo/.env.
+    # Anything Mo owns therefore has to be re-asserted here, after the import —
+    # setting it above is silently undone. (That is also why API_SERVER_PORT=0
+    # in a user's .env wins and python-bridge.ts discovers the real port with
+    # lsof instead of trusting stdout.)
+    #
+    # Both values below are security-relevant:
+    #   HOST — a stale API_SERVER_HOST=0.0.0.0 would expose the agent gateway
+    #          to the local network.
+    #   CORS — the renderer is a file:// page, so "Origin: null" is the only
+    #          origin that ever needs allowing. "*" would let any website the
+    #          user visits read the two unauthenticated endpoints (/health,
+    #          /health/detailed); the rest is gated by API_SERVER_KEY. The list
+    #          is exact-match, so a normal https:// origin gets no CORS headers
+    #          and the browser refuses the read.
+    os.environ["API_SERVER_HOST"] = "127.0.0.1"
+    os.environ["API_SERVER_CORS_ORIGINS"] = "null"
 
     success = asyncio.run(start_gateway(replace=True, verbosity=0))
     if not success:
