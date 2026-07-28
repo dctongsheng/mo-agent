@@ -26,7 +26,9 @@ The result is an agent whose competence is not frozen at install time. The skill
 - 🏠 **Local-first & private** — point it at local models (Ollama) or any OpenAI-compatible endpoint. Your memory and trajectories stay on your machine.
 - 🧠 **Persistent memory** — long-term semantic memory via a pluggable backend (OpenViking), with recall tuned to skip trivial messages.
 - 🎛️ **Configure once, then just pick** — an endpoint library lets you register a provider once and select models per scenario (chat / embedding / evolution / fine-tuning).
-- 🔬 **Fine-tuning scaffold** — collect trajectories and turn them into datasets for model fine-tuning.
+- 🔬 **Fine-tuning scaffold** — collect trajectories and turn them into datasets for model fine-tuning. *Scaffold only in this build:* dataset generation and a run ledger, without the cloud-training scripts. See [docs/configuration.md](docs/configuration.md#fine-tuning-scaffold-only).
+
+> **Note on language:** Mo's user interface is currently **Chinese-only**. The code, docs and commit history are in English, and PRs adding i18n are very welcome — but if you install it today, expect a Chinese UI.
 
 ## Architecture
 
@@ -65,7 +67,7 @@ See [docs/architecture.md](docs/architecture.md) and [docs/self-evolution.md](do
 
 - macOS (Apple Silicon)
 - Node.js ≥ 18
-- Python 3.11 with the Hermes core dependencies installed (see [docs/configuration.md](docs/configuration.md))
+- Python 3.11 — `./scripts/setup.sh` creates the venv and installs both the Hermes core dependencies and `dspy` (needed by self-evolution). See [docs/configuration.md](docs/configuration.md) if you set the environment up by hand.
 
 **Run in development**
 
@@ -91,9 +93,24 @@ npm run dist:local   # unsigned local build → app/release/
 
 Packaging bundles `server/` and `vendor/hermes-agent/` into the app's resources.
 
-## Status
+## Status & known limitations
 
 **Alpha**, macOS (Apple Silicon) only for now. APIs and layout may change. Issues and PRs welcome.
+
+Known limitations, so you can judge fit before installing:
+
+| | |
+|---|---|
+| **Platform** | macOS / Apple Silicon only. No Windows or Linux build. |
+| **UI language** | Chinese only. |
+| **Fine-tuning** | Scaffold only — no cloud-training scripts bundled. |
+| **Tests** | No automated test suite yet; CI covers typecheck, build, engine import and license compliance. |
+| **Network** | The UI loads three webfonts from Google Fonts at launch. Your chats, memory and trajectories never leave your machine, but this one request does — self-host the fonts in `index.html` if you need a fully offline app. |
+| **Self-evolution** | Rewrites skill files on disk. Candidates are constraint-checked, but a prompt-injected model can still influence skill text — see [SECURITY.md](SECURITY.md). |
+
+## Security
+
+Please report vulnerabilities privately — see [SECURITY.md](SECURITY.md). Do not open a public issue for security problems.
 
 ## Contributing
 
@@ -103,7 +120,9 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for project layout and development setup,
 
 Mo is released under the **[MIT License](LICENSE)**.
 
-It bundles the **Hermes Agent** core by **Nous Research**, also MIT-licensed. That copyright notice is preserved in `vendor/hermes-agent/LICENSE`, and the attribution is recorded in [NOTICE](NOTICE) and [THIRD_PARTY_LICENSES/](THIRD_PARTY_LICENSES/). Mo's own components — the self-evolution engine, the gateway extensions, and the desktop app — are original work.
+It bundles two MIT-licensed components by **Nous Research**: the **Hermes Agent** core (`vendor/hermes-agent/`) and the **Hermes Agent self-evolution** engine (`server/vendor/evolution/`), the latter carrying Mo-local modifications documented in [`server/vendor/README.md`](server/vendor/README.md). Their copyright notices are preserved in-tree, and the attributions are recorded in [NOTICE](NOTICE) and [THIRD_PARTY_LICENSES/](THIRD_PARTY_LICENSES/). Mo's own components — the gateway extensions and the desktop app — are original work.
+
+Some upstream material is deliberately **not** redistributed (Anthropic-licensed skills, conference LaTeX templates, licensed fonts). See [THIRD_PARTY_LICENSES/README.md](THIRD_PARTY_LICENSES/README.md).
 
 ## Acknowledgements
 

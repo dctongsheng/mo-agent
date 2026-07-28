@@ -19,6 +19,20 @@ The Hermes Agent core provides the underlying agent runtime, tool-calling loop,
 memory plugins, and gateway that Mo builds upon. Its original copyright notice
 is preserved in vendor/hermes-agent/LICENSE.
 
-Mo's own original components — the self-evolution engine (server/evolution/),
-the desktop gateway extensions (server/gateway.py), and the desktop application
-(app/) — are the work of Taiyi-AI-Lab and are licensed under the MIT License.
+This product also bundles the Hermes Agent self-evolution engine, developed by
+Nous Research and licensed under the MIT License.
+
+    Component:  Hermes Agent Self-Evolution
+                (https://github.com/NousResearch/hermes-agent-self-evolution)
+    Author:     Nous Research
+    License:    MIT
+    Location:   server/vendor/evolution/
+    Full text:  server/vendor/evolution/LICENSE
+
+Mo carries local modifications on top of that snapshot (documented in
+server/vendor/README.md); those modifications are the work of Taiyi-AI-Lab and
+are likewise released under the MIT License.
+
+Mo's own original components — the desktop gateway extensions
+(server/mo-gateway.py) and the desktop application (app/) — are the work of
+Taiyi-AI-Lab and are licensed under the MIT License.

@@ -1,8 +1,13 @@
 # Vendored: hermes-agent self-evolution (GEPA skills pipeline)
 
 Source: https://github.com/NousResearch/hermes-agent-self-evolution
+License: MIT (Nous Research) — see `evolution/LICENSE`
 Vendored under `evolution/` so the desktop gateway can run skill evolution
 without requiring a user-side clone.
+
+Attribution for this component is recorded in the top-level `NOTICE` and
+`THIRD_PARTY_LICENSES/README.md`. The local patches below are Taiyi-AI-Lab's
+work and are likewise MIT-licensed.
 
 Local patches (see git history):
 - `core/dataset_builder.py`: robust JSON salvage parser for non-GPT eval models

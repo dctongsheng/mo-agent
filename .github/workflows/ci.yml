@@ -22,6 +22,8 @@ jobs:
       - run: npm ci
       - name: Typecheck (main process)
         run: npx tsc -p tsconfig.main.json --noEmit
+      - name: Typecheck (renderer)
+        run: npx tsc -p tsconfig.renderer.json
       - name: Build (main + renderer)
         run: npm run build:all
 
@@ -33,9 +35,53 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Import GEPA engine
+      # dspy is a hard runtime dependency of the GEPA engine and is NOT a Hermes
+      # dependency — scripts/setup.sh installs it separately. Install it here too,
+      # otherwise this job silently only proves that the two dspy-free modules
+      # import, which is what previously let a broken feature ship green.
+      - name: Install engine dependencies
+        run: pip install "dspy>=3.2"
+      - name: Import GEPA engine (real entry points)
         run: |
           python -c "import sys; sys.path.insert(0, 'server/vendor'); \
             from evolution.core.config import EvolutionConfig; \
             from evolution.core.constraints import ConstraintValidator; \
+            import evolution.core.dataset_builder; \
+            import evolution.skills.skill_module; \
+            import evolution.skills.evolve_skill; \
             print('evolution engine OK')"
+
+  gateway:
+    name: Gateway — syntax check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Compile mo-gateway.py
+        run: python -m py_compile server/mo-gateway.py
+
+  licenses:
+    name: License compliance — no non-redistributable material
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: No Anthropic-proprietary skills
+        run: |
+          # Assembled at runtime so this step cannot match its own source.
+          pat="Anthropic, PBC."' All rights reserved'
+          if git ls-files -z \
+               | grep -zZv -e '^THIRD_PARTY_LICENSES/' -e '^\.github/' \
+               | xargs -0 grep -lI "$pat" 2>/dev/null; then
+            echo "::error::Anthropic proprietary material present — see THIRD_PARTY_LICENSES/README.md"
+            exit 1
+          fi
+          echo "no Anthropic-proprietary skills"
+      - name: No bundled font binaries
+        run: |
+          if git ls-files | grep -E '\.(woff2?|ttf|otf|eot)$'; then
+            echo "::error::Font binaries are tracked — we have no redistribution rights"
+            exit 1
+          fi
+          echo "no font binaries tracked"

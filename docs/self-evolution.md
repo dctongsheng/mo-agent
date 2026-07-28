@@ -2,7 +2,7 @@
 
 Mo's defining feature: it rewrites its own skills to get better at them, and only keeps a rewrite if it provably improves.
 
-A **skill** is a Markdown file (`SKILL.md`) with YAML frontmatter that teaches the agent how to do something well — for example, pitfalls to avoid when generating PowerPoint files. Over time, a hand-written skill is rarely optimal. Self-evolution closes that gap automatically.
+A **skill** is a Markdown file (`SKILL.md`) with YAML frontmatter that teaches the agent how to do something well — for example, pitfalls to avoid when scraping a paginated API. Over time, a hand-written skill is rarely optimal. Self-evolution closes that gap automatically.
 
 ## The loop
 

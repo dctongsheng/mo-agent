@@ -23,8 +23,11 @@ upstream.
   `native/`, `contributors/`, `mcp-research-data/`, upstream's top-level
   `README`/`CONTRIBUTING`/`SECURITY`/`RELEASE_*` docs.
 - **License compliance** (non-redistributable under Mo's MIT):
-  `skills/productivity/powerpoint/`, `skills/research/research-paper-writing/templates/`.
-  See [`THIRD_PARTY_LICENSES/README.md`](../THIRD_PARTY_LICENSES/README.md).
+  `skills/productivity/{powerpoint,docx,pdf,xlsx}/` (© Anthropic, PBC — all
+  rights reserved), `skills/research/research-paper-writing/templates/`
+  (conference LaTeX styles), and all font binaries under
+  `hermes_cli/web_dist/` (licensed typefaces). See
+  [`THIRD_PARTY_LICENSES/README.md`](../THIRD_PARTY_LICENSES/README.md).
 
 ### Mo's coupling surface
 

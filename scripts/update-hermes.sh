@@ -66,6 +66,9 @@ rsync -a \
   --exclude '/RELEASE_*.md' \
   \
   --exclude '/skills/productivity/powerpoint/' \
+  --exclude '/skills/productivity/docx/' \
+  --exclude '/skills/productivity/pdf/' \
+  --exclude '/skills/productivity/xlsx/' \
   --exclude '/skills/research/research-paper-writing/templates/' \
   "$TMP/src/" "$DEST/"
 
@@ -86,13 +89,30 @@ rsync -a "$TMP/src/hermes_cli/web_dist/" "$DEST/hermes_cli/web_dist/"
   exit 1
 }
 
+# The SPA build embeds licensed font binaries (Mondwest / Collapse / Rules).
+# We don't have redistribution rights, so strip them — the dashboard falls back
+# to system fonts. Cosmetic only; Mo's own UI does not use web_dist.
+echo "==> Stripping bundled font binaries from web_dist"
+rm -rf "$DEST/hermes_cli/web_dist/fonts" "$DEST/hermes_cli/web_dist/fonts-terminal"
+find "$DEST/hermes_cli/web_dist" -type f \( -name '*.woff' -o -name '*.woff2' \
+  -o -name '*.ttf' -o -name '*.otf' -o -name '*.eot' \) -delete
+
 # Fail loudly rather than shipping a license violation.
-for p in skills/productivity/powerpoint skills/research/research-paper-writing/templates; do
+for p in skills/productivity/powerpoint \
+         skills/productivity/docx \
+         skills/productivity/pdf \
+         skills/productivity/xlsx \
+         skills/research/research-paper-writing/templates; do
   if [ -e "$DEST/$p" ]; then
     echo "ERROR: $p survived the strip — license compliance broken. Aborting." >&2
     exit 1
   fi
 done
+if find "$DEST" -type f \( -name '*.woff' -o -name '*.woff2' -o -name '*.ttf' \
+     -o -name '*.otf' -o -name '*.eot' \) | grep -q .; then
+  echo "ERROR: font binaries survived the strip — license compliance broken. Aborting." >&2
+  exit 1
+fi
 [ -f "$DEST/LICENSE" ] || { echo "ERROR: upstream LICENSE missing from snapshot." >&2; exit 1; }
 
 cat > vendor/VENDOR.md <<EOF
@@ -121,8 +141,11 @@ upstream.
   \`native/\`, \`contributors/\`, \`mcp-research-data/\`, upstream's top-level
   \`README\`/\`CONTRIBUTING\`/\`SECURITY\`/\`RELEASE_*\` docs.
 - **License compliance** (non-redistributable under Mo's MIT):
-  \`skills/productivity/powerpoint/\`, \`skills/research/research-paper-writing/templates/\`.
-  See [\`THIRD_PARTY_LICENSES/README.md\`](../THIRD_PARTY_LICENSES/README.md).
+  \`skills/productivity/{powerpoint,docx,pdf,xlsx}/\` (© Anthropic, PBC — all
+  rights reserved), \`skills/research/research-paper-writing/templates/\`
+  (conference LaTeX styles), and all font binaries under
+  \`hermes_cli/web_dist/\` (licensed typefaces). See
+  [\`THIRD_PARTY_LICENSES/README.md\`](../THIRD_PARTY_LICENSES/README.md).
 
 ### Mo's coupling surface
 

@@ -37,6 +37,20 @@ function createWindow(): void {
     },
   });
 
+  // Agent replies can contain arbitrary links. Never let one navigate the app
+  // window away from the local renderer or open a second Electron window —
+  // route http(s) to the system browser and drop everything else.
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    if (/^https?:\/\//i.test(url)) void shell.openExternal(url);
+    return { action: "deny" };
+  });
+  mainWindow.webContents.on("will-navigate", (event, url) => {
+    if (!url.startsWith("file://")) {
+      event.preventDefault();
+      if (/^https?:\/\//i.test(url)) void shell.openExternal(url);
+    }
+  });
+
   const rendererDist = path.join(__dirname, "..", "..", "src", "renderer", "dist");
   const rendererDev = path.join(__dirname, "..", "..", "src", "renderer", "index.html");
 

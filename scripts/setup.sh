@@ -33,6 +33,15 @@ echo "==> Creating Python venv at vendor/hermes-agent/.venv ($PY)…"
   ./.venv/bin/pip install -e ".[messaging]"
 )
 
+# --- Self-evolution runtime dependency --------------------------------------
+# The GEPA engine (server/vendor/evolution/) imports dspy at module load —
+# without it, Mo's headline self-evolution feature fails with ModuleNotFoundError
+# the first time a run is started. dspy is not a Hermes dependency, so it has to
+# be installed explicitly. >=3.2 is required: evolve_skill.py uses the newer GEPA
+# signature (feedback metric, reflection_lm, max_metric_calls).
+echo "==> Installing self-evolution dependency (dspy)…"
+vendor/hermes-agent/.venv/bin/pip install "dspy>=3.2"
+
 cat <<'DONE'
 
 ==> Done.

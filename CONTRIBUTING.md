@@ -25,14 +25,32 @@ See [docs/configuration.md](docs/configuration.md) for model/provider config.
 
 ## Before you open a PR
 
-- **App / TypeScript:** `cd app && npm run build:all` must pass (the CI runs
-  `tsc` + a renderer build).
-- **Python:** keep `server/mo-gateway.py` importable and the evolution engine
-  loading: `python -c "import sys; sys.path.insert(0,'server/vendor'); import evolution"`.
+- **App / TypeScript:** all three must pass —
+
+  ```bash
+  cd app
+  npx tsc -p tsconfig.main.json --noEmit    # main process
+  npx tsc -p tsconfig.renderer.json         # renderer (Vite does NOT typecheck)
+  npm run build:all
+  ```
+
+- **Python:** keep `server/mo-gateway.py` compiling and the evolution engine's
+  real entry points importable (not just the dspy-free modules):
+
+  ```bash
+  python -m py_compile server/mo-gateway.py
+  python -c "import sys; sys.path.insert(0,'server/vendor'); import evolution.skills.evolve_skill"
+  ```
+
+  The second command needs `dspy>=3.2` in the active interpreter —
+  `./scripts/setup.sh` installs it into `vendor/hermes-agent/.venv`.
 - **Don't commit** secrets, `node_modules/`, build output, or anything under
   `~/.hermes-mo/`. The `.gitignore` covers the common cases — double-check `git diff --cached`.
 - **Licensing:** do not add third-party code under non-permissive terms. If you
   vendor something, preserve its license and add it to `THIRD_PARTY_LICENSES/`.
+  CI enforces two hard rules: no Anthropic-proprietary skill material, and no
+  font binaries. Both have bitten this repo before — see
+  `THIRD_PARTY_LICENSES/README.md`.
 
 ## Scope of the vendored core
 

@@ -1,0 +1,22 @@
+version: 2
+updates:
+  # Desktop app. The vendored Hermes core is deliberately excluded — it is a
+  # snapshot refreshed by scripts/update-hermes.sh, not a managed dependency.
+  - package-ecosystem: npm
+    directory: /app
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      dev-dependencies:
+        dependency-type: development
+    commit-message:
+      prefix: "chore"
+      include: scope
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: "chore"

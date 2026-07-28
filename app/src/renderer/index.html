@@ -3,6 +3,27 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <!--
+    The renderer displays model output, which is untrusted input. This policy
+    blocks remote scripts, framing, plugin content and form exfiltration while
+    still allowing what the app actually needs:
+      - 'unsafe-inline' style  — React inline styles + <style> in Markdown.tsx
+      - fonts.googleapis/gstatic — the three webfonts loaded below
+      - http://localhost:*     — the local gateway (port is chosen per boot)
+    If you self-host the fonts, drop the two Google origins as well.
+  -->
+  <meta http-equiv="Content-Security-Policy" content="
+    default-src 'self' file:;
+    script-src 'self' file:;
+    style-src 'self' file: 'unsafe-inline' https://fonts.googleapis.com;
+    font-src 'self' file: data: https://fonts.gstatic.com;
+    img-src 'self' file: data: blob:;
+    connect-src 'self' http://localhost:* http://127.0.0.1:*;
+    object-src 'none';
+    base-uri 'none';
+    form-action 'none';
+    frame-ancestors 'none';
+  " />
   <title>貘 Mo · 桌面 Agent</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />

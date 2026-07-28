@@ -1275,6 +1275,22 @@ def _mount_mo_routes(app) -> None:
                         lf.flush()
                         _ft_update_run(run_id, status="done", finished_at=time.time(), scaffold=True)
                         return
+                    # The MinT training scripts are not redistributed with the
+                    # open-source build (see THIRD_PARTY_LICENSES/README.md).
+                    # Fail with an actionable message instead of a bare
+                    # FileNotFoundError from subprocess.
+                    if not (ft_vendor / script).exists():
+                        lf.write(
+                            "[未安装] 云训练脚本不在此发行版中。\n"
+                            f"缺少: {ft_vendor / script}\n\n"
+                            "开源版仅提供微调脚手架（数据集收集 + 运行台账）。\n"
+                            "如需真正发起 MinT 云训练，请自行安装 mint-lora-training\n"
+                            "到 server/vendor/finetune/，参见 docs/configuration.md。\n"
+                        )
+                        lf.flush()
+                        _ft_update_run(run_id, status="failed", finished_at=time.time(),
+                                       error="finetune scripts not bundled in this distribution")
+                        return
                     env = dict(os.environ)
                     env["MINT_API_KEY"] = cfg["mint_api_key"]
                     env.setdefault("MINT_BASE_URL", "https://mint.macaron.xin")

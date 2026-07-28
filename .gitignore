@@ -24,9 +24,23 @@ __pycache__/
 
 # Runtime / local state
 .env
-.env.local
+.env.*
+!.env.example
 *.log
 .DS_Store
+
+# Secrets — belt and braces. Nothing of the sort is tracked today; these rules
+# exist so an accidental `git add -A` can't be the thing that leaks a key.
+*.pem
+*.key
+*.p12
+*.pfx
+*.keystore
+*.jks
+id_rsa*
+id_ed25519*
+credentials.json
+service-account*.json
 
 # Editor
 .idea/
