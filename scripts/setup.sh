@@ -26,8 +26,11 @@ echo "==> Creating Python venv at vendor/hermes-agent/.venv ($PY)…"
 ( cd vendor/hermes-agent
   "$PY" -m venv .venv
   ./.venv/bin/pip install --upgrade pip >/dev/null
-  echo "==> Installing Hermes Agent core (pip install -e)…"
-  ./.venv/bin/pip install -e .
+  # [messaging] pulls aiohttp/discord.py/slack-sdk. Without it the Telegram,
+  # Discord and Slack platform adapters in ~/.hermes-mo/config.yaml fail to
+  # load ("No module named 'aiohttp'") and the gateway starts without them.
+  echo "==> Installing Hermes Agent core (pip install -e '.[messaging]')…"
+  ./.venv/bin/pip install -e ".[messaging]"
 )
 
 cat <<'DONE'
