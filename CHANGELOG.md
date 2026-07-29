@@ -6,6 +6,47 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — Hermes' own loops, surfaced and gated
+
+- **`/learn` (教它一手).** Point it at a directory, a URL, or the conversation
+  you just had; it drafts a SKILL.md in a sandbox profile and you review before
+  anything reaches your skills dir. Verified with a real run: `arxiv-api-curl`,
+  4175 chars, 195s, description 42/60, skills dir untouched until accept.
+  `invalid_frontmatter` is the one refusal `force` will not clear — a >60-char
+  description installs a skill that can never route.
+- **Curation (清点技艺).** Hermes' curator marks skills stale at 30 days and
+  archives them at 90, on a timer, with no UI. Mo intercepts the one function
+  that moves files and turns it into a proposal, keeping the entire upstream
+  exemption policy intact. The page shows what each skill costs the always-on
+  system prompt — on this install, retiring the 52 proposals reclaims 628k
+  characters.
+- **待办 inbox.** Staged skill/memory writes, retirement proposals and learn
+  drafts in one list. The background-review fork — which writes to disk every
+  ~10 turns with no history and no off switch — now stages into it, while
+  anything you say directly still applies instantly.
+- **Background-review log.** `summarize_background_review_actions` already
+  produced the human-readable summary; upstream printed it once and dropped it.
+  It's now appended to `background_review.jsonl`.
+- **Ledger.** Read-only views over `/api/learning/graph` and
+  `/api/analytics/usage`, both of which Hermes already served and Mo never used.
+
+### Fixed
+
+- **A 2026-09-17 deadline.** The curator had already run three times here and
+  marked 52 skills stale; the cohort created 2026-06-19 would have had its
+  directories moved on the next weekly tick after that date.
+- **"下次新会话生效" was wrong.** The skills-index LRU key contains no mtime and
+  nothing clears it at session start, so an accepted skill takes effect at the
+  next gateway *process* start. Corrected, with a restart button, rather than
+  clearing the cache — which would have repaired the label by breaking the
+  no-hot-swap rule it describes.
+- **`revert()` on a never-existed version** wrote a zero-byte SKILL.md into a
+  still-indexed directory. It now removes the directory, and a removed skill
+  can still be recovered from its later archived versions.
+- **A name collision in `/learn` never fired**, because `name_taken` is marked
+  non-fatal (it *is* forceable) and was being looked for in the fatal set —
+  a collision would have silently overwritten an existing skill.
+
 ### Added — 夜貘 chooses, and commits to a prediction
 
 - **Reflection** (`server/mo_evolve/reflect.py`). The nightly loop picked

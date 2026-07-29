@@ -22,6 +22,9 @@ Most agents are static: the prompt and skills you ship are the prompt and skills
 The result is an agent whose competence is not frozen at install time. The skills you use most get sharper the more you use them.
 
 - 🧬 **Self-evolving skills** — a nightly optimizer rotates through your custom skills, improving them one at a time. Candidates are judged on the exchanges you marked 好评/差评, must clear a paired-bootstrap significance gate and a regression pin set, and pass size / growth / structure / injection constraints. Nothing auto-deploys, and every accepted rewrite is snapshotted and revertible.
+- 📚 **Teach it a trick** — point it at a directory, a URL, or the conversation you just had, and it drafts a new skill in a sandbox. You read the draft before anything touches your real skills.
+- 🧹 **Nothing retires behind your back** — Hermes archives skills unused for 90 days on a timer. Mo turns that into a proposal and shows what each one costs your always-on prompt.
+- 📥 **A待办 list for the agent's own edits** — the background review fork writes memories and skills to disk every ~10 turns. Those land in an inbox you approve; what you say directly still takes effect immediately.
 - 🖥️ **Real desktop agent** — chat, terminal, file access and a tool-calling loop, powered by the Hermes Agent core.
 - 🏠 **Local-first & private** — point it at local models (Ollama) or any OpenAI-compatible endpoint. Your memory and trajectories stay on your machine.
 - 🧠 **Persistent memory** — long-term semantic memory via a pluggable backend (OpenViking), with recall tuned to skip trivial messages.

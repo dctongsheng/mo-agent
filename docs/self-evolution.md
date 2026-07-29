@@ -252,11 +252,102 @@ Every version is listed in the app with a one-click revert, and a revert is itse
 
 Calling `clear_skills_system_prompt_cache` on accept would fix the label and break the thing the label protects: a mid-conversation turn would rebuild its prefix and throw away the provider-side prompt cache of a session already in flight. So Mo says what's true — 「下次启动生效」 — and offers a restart button. `skill_usage.archive_skill()` has the same property, so retiring a skill carries the same notice: until the restart, the running process still advertises a skill whose directory has moved, and `skill_view` on it would fail.
 
+## What Hermes does on its own, and what Mo does about it
+
+Three of Hermes' own loops write to disk without asking. Mo's whole premise is
+that nothing changes behind your back, so each one is intercepted at exactly
+one function and turned into something you decide.
+
+### The curator (清点技艺)
+
+`agent/curator.py` runs from the gateway's hourly housekeeping tick — the
+gateway Mo itself starts. It marks a skill `stale` at 30 days idle and, at 90,
+calls `skill_usage.archive_skill()`, which `mv`s the directory into
+`skills/.archive/`. No prompt, no diff, nothing in any UI.
+
+It had already run three times on the development machine and marked 52 skills
+stale. Working the arithmetic against the real `.usage.json`, the 77-skill
+cohort created 2026-06-19 crossed the 90-day line on **2026-09-17**.
+
+Mo swaps `skill_usage.archive_skill` for a recorder. That leaf and not
+`apply_automatic_transitions`, because the latter is ~60 lines of exemption
+logic — pinned, cron-referenced, protected built-ins, first-sight seeding, the
+never-used grace floor — that would then have to be kept in sync through every
+re-vendor. `archive_skill` is the only call in it that touches the filesystem,
+so swapping it keeps the entire policy running and non-destructive. It works
+because `curator.py` does `from tools import skill_usage as _u` *inside* the
+function, so the attribute resolves at call time.
+
+The same interception catches `skill_manage` deletes and
+`learning_mutations.delete_node`; those become proposals labelled
+`agent-delete`.
+
+If the swap fails to install, `archive_after_days` is clamped as a fail-safe and
+`guard_installed: false` goes to the API. A guard that silently failed would
+have the UI claiming protection that isn't there — worse than no guard.
+
+### The background review (待办)
+
+`agent/background_review.py` forks a second `AIAgent` every ~10 turns and writes
+memories *and* skills straight to disk. No history, no endpoint, and **no
+`enabled` flag anywhere in the core**. This is a larger unconsented-write
+surface than the curator: it fires every ten turns, not every ninety days.
+
+Upstream's write-approval gate is one boolean per subsystem, and neither
+setting is right — off, background writes flow freely; on, telling 小貘
+「记住我用 pnpm」 also needs a trip to a queue. So Mo turns both flags on and
+shims `evaluate_gate` to pass foreground writes through. The shim is inert
+unless Mo set the flags itself (a `_mo_background_only` marker), so a user who
+deliberately enabled full approval keeps it.
+
+`summarize_background_review_actions` already produces the human-readable list
+of what a pass did; upstream prints it once and discards it. Mo appends it to
+`background_review.jsonl`. There is still no off switch — setting both nudge
+intervals very high is the only way, and the UI says so rather than implying a
+toggle exists.
+
+### Both write paths need a restart
+
+Neither `archive_skill` nor an accept clears the skills-index cache, so until
+the next gateway process start the running agent still advertises a skill whose
+directory moved. Same 「下次启动生效」 contract as everything else.
+
+## 教它一手 (`/learn`)
+
+Hermes can author a skill from a directory, a URL, or the conversation you just
+had. Three things make wiring that in non-obvious, and each fails in a way that
+looks like success:
+
+- **`-q "/learn ..."` does not work.** Slash commands are dispatched only from
+  the interactive REPL, so the text reaches the model verbatim and it answers a
+  question *about* learning. `build_learn_prompt()` is pure and importable —
+  build the prompt, pass it as the query.
+- **The sandbox path shape is load-bearing.** `hermes_cli/main.py:620-623`
+  trusts a pre-set `HERMES_HOME` unconditionally only when its parent directory
+  is literally named `profiles`; anywhere else an `active_profile` file can
+  redirect the run into your real skills tree. Hence
+  `<root>/profiles/mo-learn`.
+- **A staged write leaves the skills dir empty.** With `skills.write_approval`
+  on, `evaluate_gate` stages every skill write and returns `success: true`
+  having written nothing. Harvesting only the skills dir yields an empty draft
+  with no error, so both sources are read.
+
+### The one refusal `force` cannot clear
+
+Everywhere else in Mo, a refusal becomes a second confirmation. `/learn` breaks
+that for `invalid_frontmatter`, and deliberately.
+
+Forcing a failed gate deploys a risky improvement. Forcing a 61-character
+description deploys a skill that **cannot fire**: the system-prompt index
+truncates at 60 characters, so it installs, appears in the list, and never
+routes. There is nothing to gain by allowing it. The draft view shows a live
+`42/60` counter and offers a rewrite instead of a force button.
+
 ## What 夜貘 cannot do yet
 
 Being straight about the current limits, because the UI's poetry is easy to over-read:
 
-- **夜貘 cannot author, split, or retire a skill.** It can only rewrite the body of one that already exists. A cluster of failures with no covering skill is invisible to it.
+- **夜貘 cannot split a skill, and doesn't author or retire on its own initiative.** `/learn` and the retirement proposals both exist now, but you drive them — 夜貘's own nightly reflection still only picks an existing skill to rewrite. A cluster of failures with no covering skill is still invisible to it.
 - **Its reasoning is one LLM call, not an agent turn.** It sees a summary someone else assembled; it cannot go read a skill or grep a session to check a hunch. (`hermes --profile ye-mao-evolve chat -q` would give it a real turn with tools — that's the intended route for on-demand use, not the nightly loop.)
 - **The critic is one opinion, not a panel**, and it reviews the winner rather than the search.
 - **Nothing here is verified end-to-end against a live model.** The unit tests cover the decision logic with the LLM faked; the cost and quality of a real run are not yet measured.
@@ -269,7 +360,7 @@ Optimizer and judge models are chosen via the endpoint library (`/api/mo/models/
 
 | Path | Contents |
 |---|---|
-| `server/mo_evolve/` | Mo-original: `store` (run state), `reflect` (target choice + plans), `verify` (prediction scoring + calibration), `critic` (cross-model review), `trajectory_importer` / `trajectory_dataset` (mining), `metric` (tiered judge), `gate` (bootstrap + pins), `safety` (scan), `skill_archive` (versions + revert), `accept` (guarded apply). Importable and unit-tested. |
+| `server/mo_evolve/` | Mo-original: `store` (run + learn ledgers, pending), `reflect` (target choice + plans), `verify` (prediction scoring + calibration), `critic` (cross-model review), `trajectory_importer` / `trajectory_dataset` (mining), `metric` (tiered judge), `gate` (bootstrap + pins), `safety` (scan), `skill_archive` (versions + revert), `accept` (guarded apply), `curator` (retirement proposals + the guard), `learn` (sandboxed authoring), `inbox` (staged writes + review log). Importable and unit-tested. |
 | `server/vendor/evolution/` | The GEPA engine, vendored from NousResearch/hermes-agent-self-evolution (MIT) with Mo's local patches — see `server/vendor/README.md`. |
 | `server/tests/` | `pytest server/tests`. No test touches the network or a real `~/.hermes-mo`. |
 | `server/mo-gateway.py` | Route handlers only; they delegate to `mo_evolve`. |
