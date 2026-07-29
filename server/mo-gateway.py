@@ -977,8 +977,31 @@ def _mount_mo_routes(app) -> None:
             return
         soul = _evolver_home / "SOUL.md"
         try:
-            if not soul.exists() or not soul.read_text(encoding="utf-8").strip():
-                soul.write_text(_reflect.DEFAULT_CONSTITUTION, encoding="utf-8")
+            cur = soul.read_text(encoding="utf-8") if soul.exists() else ""
+        except Exception as exc:
+            logging.getLogger("hermes.desktop").warning("read SOUL.md failed: %s", exc)
+            return
+
+        # Replace when missing, empty, or still the stock Hermes soul. The
+        # profile is cloned from `default` with clone_config=True, which copies
+        # that soul in — so seeding only-if-absent left 夜貘 reasoning as a
+        # generic assistant, which is not a persona that knows it is supposed to
+        # abstain rather than pick a target at random.
+        #
+        # Comparing against the stock text (rather than, say, looking for 夜貘)
+        # means a constitution the user has written is never clobbered.
+        stock = ""
+        try:
+            from hermes_cli.default_soul import DEFAULT_SOUL_MD  # type: ignore
+            stock = DEFAULT_SOUL_MD.strip()
+        except Exception:
+            pass
+
+        if cur.strip() and cur.strip() != stock:
+            return                       # user-authored, or already 夜貘's
+        try:
+            soul.write_text(_reflect.DEFAULT_CONSTITUTION, encoding="utf-8")
+            logging.getLogger("hermes.desktop").info("seeded 夜貘 constitution at %s", soul)
         except Exception as exc:
             logging.getLogger("hermes.desktop").warning("seed SOUL.md failed: %s", exc)
 
@@ -1698,7 +1721,26 @@ def _mount_mo_routes(app) -> None:
     # The dashboard registers a catch-all GET /{path} route at import time,
     # which would shadow our routes (FastAPI matches in registration order).
     # Re-order so /api/mo/* is matched first.
-    mo_routes = [r for r in app.router.routes if getattr(r, "path", "").startswith("/api/mo")]
+    #
+    # Two shapes to recognise. Up to FastAPI 0.11x, include_router() spliced the
+    # router's own Route objects into app.router.routes, each with a full
+    # /api/mo/... path. From 0.140 it appends a single lazy `_IncludedRouter`
+    # wrapper whose `path` is "" — so matching on path alone silently found
+    # nothing here, the re-order became a no-op, and every /api/mo/* request
+    # fell through to the dashboard's catch-all as "No such API endpoint".
+    def _is_mo(route) -> bool:
+        if getattr(route, "path", "").startswith("/api/mo"):
+            return True
+        inner = getattr(route, "original_router", None)
+        return bool(inner is not None and getattr(inner, "prefix", "").startswith("/api/mo"))
+
+    mo_routes = [r for r in app.router.routes if _is_mo(r)]
+    if not mo_routes:
+        logging.getLogger("hermes.desktop").warning(
+            "No /api/mo routes found after include_router — the desktop API will "
+            "be shadowed by the dashboard catch-all (FastAPI %s)",
+            getattr(__import__("fastapi"), "__version__", "?"),
+        )
     other_routes = [r for r in app.router.routes if r not in mo_routes]
     app.router.routes = mo_routes + other_routes
 
