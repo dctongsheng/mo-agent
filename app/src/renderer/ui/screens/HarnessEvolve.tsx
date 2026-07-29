@@ -8,7 +8,7 @@ import {
   getEvolveStatus, listEvolveSkills, runEvolve, listEvolveRuns, getEvolveRun,
   acceptEvolveRun, rejectEvolveRun, getEvolveSchedule, setEvolveSchedule, getEvolveRunLog,
   listSkillVersions, revertSkill,
-  EvolveStatus, EvolveSkill, EvolveRun, EvolveRunDetail, EvolveSchedule, SkillVersion,
+  EvolveStatus, EvolveSkill, EvolveRun, EvolveRunDetail, EvolveSchedule, SkillVersion, EvalSource,
 } from "../../services/mo-api";
 
 function fmt(ts?: number): string {
@@ -32,6 +32,14 @@ const METRIC_LABEL: Record<string, string> = {
   heuristic: "词袋启发式", tiered: "分层评审", judge: "全量 LLM 评审",
 };
 
+/** Where the eval set comes from. `synthetic` asks a model to imagine tasks
+ *  from the skill's own text — the loop never sees what you actually asked for. */
+const SOURCE_LABEL: Record<EvalSource, string> = {
+  mixed: "轨迹为主,不足时补合成",
+  trajectory: "只用真实轨迹",
+  synthetic: "只用合成任务",
+};
+
 /** Harness 自进化 · 技艺 — drives the GEPA skill-evolution pipeline. */
 export function HarnessEvolve() {
   const moPort = useAppSelector((s) => moPortOf(s.gateway.state));
@@ -41,6 +49,7 @@ export function HarnessEvolve() {
   const [runs, setRuns] = useState<EvolveRun[]>([]);
   const [skill, setSkill] = useState("");
   const [iterations, setIterations] = useState(4);
+  const [evalSource, setEvalSource] = useState<EvalSource>("mixed");
   const [busy, setBusy] = useState(false);
   const [openRun, setOpenRun] = useState<EvolveRunDetail | null>(null);
   const [sched, setSched] = useState<EvolveSchedule | null>(null);
@@ -87,7 +96,7 @@ export function HarnessEvolve() {
   const start = () => {
     if (!moPort || !skill || busy) return;
     setBusy(true);
-    runEvolve(moPort, skill, iterations).then((r) => {
+    runEvolve(moPort, skill, iterations, evalSource).then((r) => {
       if (!r.ok) alert(`进化引擎未就绪：${r.reason ?? "未知原因"}`);
       setTimeout(refresh, 500);
     }).catch(() => {}).finally(() => setBusy(false));
@@ -199,6 +208,13 @@ export function HarnessEvolve() {
               <input type="checkbox" checked={includeBuiltin} onChange={(e) => setIncludeBuiltin(e.target.checked)} />
               包含内置技艺{!includeBuiltin && customCount === 0 ? "（勾选后可进化内置技艺）" : ""}
             </label>
+            <label style={lbl}>评测数据来源
+              <select value={evalSource} onChange={(e) => setEvalSource(e.target.value as EvalSource)} style={sel}>
+                {(Object.keys(SOURCE_LABEL) as EvalSource[]).map((k) => (
+                  <option key={k} value={k}>{SOURCE_LABEL[k]}</option>
+                ))}
+              </select>
+            </label>
             <label style={lbl}>迭代次数 · {iterations}
               <input type="range" min={1} max={12} value={iterations} onChange={(e) => setIterations(Number(e.target.value))} style={{ width: "100%" }} />
             </label>
@@ -229,6 +245,22 @@ export function HarnessEvolve() {
                 <input type="number" min={0} max={23} value={sched.hour} onChange={(e) => saveSched({ hour: Number(e.target.value) })} style={numIn} />:
                 <input type="number" min={0} max={59} value={sched.minute} onChange={(e) => saveSched({ minute: Number(e.target.value) })} style={numIn} />
                 · 自动挑一项技艺打磨
+              </div>
+            )}
+            {sched?.enabled && (
+              <div style={{ marginTop: 8 }}>
+                <select
+                  value={sched.eval_source ?? "mixed"}
+                  onChange={(e) => saveSched({ eval_source: e.target.value as EvalSource })}
+                  style={{ ...sel, height: 30, fontSize: 12 }}
+                >
+                  {(Object.keys(SOURCE_LABEL) as EvalSource[]).map((k) => (
+                    <option key={k} value={k}>{SOURCE_LABEL[k]}</option>
+                  ))}
+                </select>
+                <div style={{ fontSize: 11, color: "var(--ink-3)", marginTop: 5, lineHeight: 1.6 }}>
+                  夜里正是真实轨迹最派得上用场的时候——白天攒下的差评,晚上拿来打磨。
+                </div>
               </div>
             )}
           </div>
@@ -341,6 +373,53 @@ export function HarnessEvolve() {
                       在 {openRun.gate.pin_regressions.length} 条历史钉集样本上回归。
                     </div>
                   )}
+                </div>
+              )}
+
+              {/* Evidence. Without this a run is a progress bar and a number;
+                  with it you can see 夜貘 read six exchanges you marked bad and
+                  what they had in common. */}
+              {openRun.metrics?.dataset?.counts && (
+                <div style={{ marginBottom: 14, padding: "10px 14px", borderRadius: 9, fontSize: 12.5,
+                              border: "1px solid var(--line-2)", lineHeight: 1.6 }}>
+                  <div style={{ fontWeight: 600 }}>依据</div>
+                  <div style={{ color: "var(--ink-2)", marginTop: 3 }}>
+                    {(() => {
+                      const c = openRun.metrics!.dataset!.counts!;
+                      const parts: string[] = [];
+                      if (c.trajectory_neg) parts.push(`${c.trajectory_neg} 条差评轨迹`);
+                      if (c.trajectory_pos) parts.push(`${c.trajectory_pos} 条好评轨迹`);
+                      if (c.trajectory_unlabelled) parts.push(`${c.trajectory_unlabelled} 条未标注轨迹`);
+                      if (c.synthetic) parts.push(`${c.synthetic} 条合成任务`);
+                      return parts.length
+                        ? `读了 ${parts.join("、")}。`
+                        : "没有可用的真实轨迹,本次全部使用合成任务。";
+                    })()}
+                  </div>
+                  {!!openRun.metrics.dataset.failure_modes &&
+                    Object.keys(openRun.metrics.dataset.failure_modes).length > 0 && (
+                    <div style={{ color: "var(--ink-2)", marginTop: 3 }}>
+                      主要问题：{Object.entries(openRun.metrics.dataset.failure_modes)
+                        .sort((a, b) => b[1] - a[1]).slice(0, 4)
+                        .map(([mode, n]) => `${mode} ×${n}`).join("、")}
+                    </div>
+                  )}
+                  {/* Keyed off the counts, not `source`: a `mixed` run that
+                      mined nothing is 100% synthetic but still reports its
+                      source as "mixed", and that is exactly the case where the
+                      caveat matters most. */}
+                  {(() => {
+                    const c = openRun.metrics!.dataset!.counts!;
+                    const fromTrajectories = (c.trajectory_neg ?? 0) + (c.trajectory_pos ?? 0)
+                      + (c.trajectory_unlabelled ?? 0);
+                    return fromTrajectories === 0 ? (
+                      <div style={{ color: "var(--ink-3)", marginTop: 3, fontSize: 11.5 }}>
+                        全部来自合成任务。合成评测集是从技艺自己的文本生成的,是个自指的
+                        闭环——它衡量技艺是否贴合自己的描述,而不是是否帮到了你。
+                        多聊几轮、给回答打上好评/差评,下次就有真实依据了。
+                      </div>
+                    ) : null;
+                  })()}
                 </div>
               )}
 

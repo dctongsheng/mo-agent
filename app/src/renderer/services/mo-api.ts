@@ -186,12 +186,23 @@ export type EvolveFitness = {
     evolved: Record<string, number>;
   };
 };
+/** Where the eval examples came from. This is what makes a run legible:
+ *  "read 6 negative trajectories, mostly about ignoring length constraints". */
+export type EvolveDataset = {
+  source?: string;
+  counts?: { trajectory_neg?: number; trajectory_pos?: number; trajectory_unlabelled?: number; synthetic?: number };
+  turns_mined?: number;
+  failure_modes?: Record<string, number>;
+  trajectory_ids?: string[];
+  holdout_strata?: Record<string, number>;
+};
 export type SafetyFinding = { severity: "high" | "medium"; pattern: string; line: string; why: string };
 export type EvolveRunDetail = EvolveRun & {
   baseline?: string; evolved?: string; diff?: string;
   metrics?: {
     baseline_score?: number; evolved_score?: number; improvement?: number;
     baseline_size?: number; evolved_size?: number; fitness?: EvolveFitness;
+    dataset?: EvolveDataset;
   };
   gate?: EvolveGate | null;
   safety?: { findings?: SafetyFinding[] } | null;
@@ -206,11 +217,18 @@ export type SkillVersion = {
   version: number; at: number; run_id?: string; kind?: string;
   sha256?: string; size?: number; existed?: boolean; forced?: boolean;
 };
-export type EvolveSchedule = { enabled: boolean; hour: number; minute: number; skill: string; iterations: number };
+export type EvolveSchedule = {
+  enabled: boolean; hour: number; minute: number; skill: string;
+  iterations: number; eval_source?: EvalSource;
+};
 
 export const getEvolveStatus = (port: number) => moFetch<EvolveStatus>(port, "/api/mo/evolve/status");
 export const listEvolveSkills = (port: number) => moFetch<{ data: EvolveSkill[] }>(port, "/api/mo/evolve/skills");
-export const runEvolve = (port: number, skill: string, iterations: number, eval_source = "synthetic") =>
+/** `mixed` mines the user's own trajectories and tops up with synthetic when
+ *  too few are found — the default, because a purely synthetic eval set is
+ *  synthesized from the skill's own text and the loop is self-referential. */
+export type EvalSource = "mixed" | "trajectory" | "synthetic";
+export const runEvolve = (port: number, skill: string, iterations: number, eval_source: EvalSource = "mixed") =>
   moFetch<{ ok: boolean; run_id?: string; reason?: string }>(port, "/api/mo/evolve/run", {
     method: "POST", body: JSON.stringify({ skill, iterations, eval_source }),
   });

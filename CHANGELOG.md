@@ -6,6 +6,51 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — 夜貘 evolves against your real chat history
+
+- **Trajectory mining** (`server/mo_evolve/trajectory_importer.py`,
+  `trajectory_dataset.py`). `trajectories.jsonl` and the 好评/差评 labels have
+  been collected since day one and fed to exactly nothing; the eval set was
+  synthesized from each skill's own text, so the loop was self-referential — a
+  skill could score perfectly against a model's imagination of itself while
+  being useless in practice. New eval sources `trajectory` and `mixed`, the
+  latter now the default for both manual and scheduled runs.
+- **Corrective rubrics for negative examples.** `RelevanceFilter` derives its
+  rubric partly from the assistant's actual response; for a turn the user
+  rejected, that response *is* the bug, so an unmodified rubric would train the
+  optimizer to reproduce the failure. Those turns go through
+  `DeriveCorrectiveRubric` instead, which is asked what a good answer would have
+  done, plus a failure-mode tag. This inversion is the point of mining
+  trajectories at all — GEPA's reflective mutation only reads feedback from
+  candidates that scored badly.
+- **An evidence panel.** A run used to be a progress bar and a number. It now
+  says what it read: 「读了 6 条差评轨迹、4 条合成任务。主要问题：
+  ignored-length-constraint ×4」. When an eval set turns out to be entirely
+  synthetic it says so, and explains why that is a weaker basis.
+
+### Fixed — trajectory label semantics
+
+- **A 差评 no longer condemns the whole session.** `add_trajectory` folds every
+  turn of a session into one trajectory with one label; a 差评 on turn 5 of 12
+  means the user disliked *that answer*, not the eleven before it. Carrying the
+  label across them sent eleven good answers through a prompt that opens "the
+  user marked this exchange as unsatisfactory", fabricating eleven failure
+  modes and eleven rubrics that "correct" answers that were fine. Earlier turns
+  are now recorded as `neg_context` and treated as unlabelled.
+- **The newest duplicate wins.** Provenance was re-attached by keying a dict on
+  `task_input` over a newest-first list, so the *last* write — the oldest
+  episode — won. Ask the same question Monday (fine) and Friday (差评) and the
+  Friday label was silently discarded.
+- **The holdout now reaches the gate's floor.** Splitting per-stratum and
+  letting the holdout be whatever fell out produced holdouts of 4, or 0, from
+  perfectly reasonable datasets — so a run completed, spent its entire GEPA
+  budget, and was then refused for sample size, every time. The holdout is now
+  sized against `min_holdout` first and filled proportionally across label
+  strata (it must not become all-negatives, which would measure recovery from
+  failure rather than quality). Shuffling is seeded so verdicts stay
+  reproducible; the blend threshold is derived from the gate rather than
+  guessed.
+
 ### Added — self-evolution trust layer
 
 - **Real fitness scoring.** The vendored engine shipped a complete `LLMJudge`,
@@ -39,7 +84,7 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   system prompt, while its body loads on demand — so frontmatter is the one
   part with an unconditional blast radius. It survived evolution only by
   accident of `reassemble_skill()`; now it's an enforced constraint.
-- **Test suite.** `pytest server/tests` — 129 tests, no network, no real
+- **Test suite.** `pytest server/tests` — no network, no real
   `~/.hermes-mo`. Includes a regression lock on the fix for upstream issue #141
   (skill body as a signature instruction rather than an inert attribute), which
   is what makes evolution a real mutation instead of a no-op. New CI job.

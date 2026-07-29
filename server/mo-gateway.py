@@ -685,9 +685,9 @@ def _mount_mo_routes(app) -> None:
         if not skill:
             raise HTTPException(400, "skill required")
         iterations = max(1, min(20, int(body.get("iterations", 4))))
-        eval_source = str(body.get("eval_source", "synthetic"))
-        if eval_source not in ("synthetic", "sessiondb"):
-            eval_source = "synthetic"
+        eval_source = str(body.get("eval_source", "mixed"))
+        if eval_source not in ("synthetic", "sessiondb", "trajectory", "mixed"):
+            eval_source = "mixed"
         return _spawn_evolution(skill, iterations, eval_source)
 
     @router.get("/evolve/runs")
@@ -836,8 +836,12 @@ def _mount_mo_routes(app) -> None:
 
     @router.get("/evolve/schedule")
     def evolve_get_schedule():
-        return _read_json(_schedule_file, {"enabled": False, "hour": 3, "minute": 0,
-                                           "skill": "auto", "iterations": 4})
+        sched = _read_json(_schedule_file, None) or {}
+        return {"enabled": bool(sched.get("enabled", False)),
+                "hour": int(sched.get("hour", 3)), "minute": int(sched.get("minute", 0)),
+                "skill": sched.get("skill", "auto"),
+                "iterations": int(sched.get("iterations", 4)),
+                "eval_source": sched.get("eval_source", "mixed")}
 
     @router.put("/evolve/schedule")
     async def evolve_set_schedule(request: Request):
@@ -848,6 +852,9 @@ def _mount_mo_routes(app) -> None:
             "minute": max(0, min(59, int(body.get("minute", 0)))),
             "skill": str(body.get("skill", "auto")) or "auto",
             "iterations": max(1, min(20, int(body.get("iterations", 4)))),
+            "eval_source": (str(body.get("eval_source", "mixed"))
+                            if body.get("eval_source") in ("synthetic", "trajectory", "mixed")
+                            else "mixed"),
         }
         _evolve_dir.mkdir(parents=True, exist_ok=True)
         _write_json(_schedule_file, sched)
@@ -907,7 +914,11 @@ def _mount_mo_routes(app) -> None:
                         # don't double-fire if a run is already in flight
                         running = any(r.get("status") == "running" for r in _read_runs())
                         if skill and not running:
-                            _spawn_evolution(skill, int(sched.get("iterations", 4)), "synthetic")
+                            # Default to `mixed`: the nightly loop is exactly
+                            # where real trajectories beat synthetic ones, and
+                            # it falls back to synthetic when too few are mined.
+                            _spawn_evolution(skill, int(sched.get("iterations", 4)),
+                                             sched.get("eval_source", "mixed"))
             except Exception:
                 pass
             time.sleep(30)

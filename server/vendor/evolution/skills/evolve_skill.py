@@ -46,6 +46,10 @@ try:
     from mo_evolve import safety as _safety
 except ImportError:  # pragma: no cover
     _safety = None
+try:
+    from mo_evolve.trajectory_dataset import build_dataset_from_trajectories as _build_from_trajectories
+except ImportError:  # pragma: no cover
+    _build_from_trajectories = None
 
 console = Console()
 
@@ -97,6 +101,9 @@ def evolve(
     # ── 2. Build or load evaluation dataset ─────────────────────────────
     console.print(f"\n[bold]Building evaluation dataset[/bold] (source: {eval_source})")
 
+    # Bound on every branch — only the trajectory path fills it in.
+    dataset_provenance = {"source": eval_source}
+
     if eval_source == "golden" and dataset_path:
         dataset = GoldenDatasetLoader.load(Path(dataset_path))
         console.print(f"  Loaded golden dataset: {len(dataset.all_examples)} examples")
@@ -113,6 +120,29 @@ def evolve(
             console.print("[red]✗ No relevant examples found from session history[/red]")
             sys.exit(1)
         console.print(f"  Mined {len(dataset.all_examples)} examples from session history")
+    elif eval_source in ("trajectory", "mixed"):
+        # Mo local patch: mine the user's own chat episodes and 好评/差评 labels.
+        # Without this the eval set is synthesized from the skill's own text and
+        # the loop is self-referential — the skill is optimized against a model's
+        # imagination of it, never against what the user actually asked for.
+        if _build_from_trajectories is None:
+            console.print("[red]✗ Trajectory mining unavailable (mo_evolve not on path)[/red]")
+            sys.exit(1)
+        traj_file = Path(hermes_repo or config.hermes_agent_path) / "trajectories" / "trajectories.jsonl"
+        dataset, dataset_provenance = _build_from_trajectories(
+            skill_name=skill_name,
+            skill_text=skill["raw"],
+            traj_file=traj_file,
+            model=eval_model,
+            config=config,
+            blend_synthetic=(eval_source == "mixed"),
+            console=console,
+        )
+        if not dataset.all_examples:
+            console.print("[red]✗ No relevant examples found in trajectories[/red]")
+            console.print("  聊几轮再来,或给几条回答打上好评/差评。")
+            sys.exit(1)
+        dataset.save(Path("datasets") / "skills" / skill_name)
     elif eval_source == "synthetic":
         builder = SyntheticDatasetBuilder(config)
         dataset = builder.generate(
@@ -124,6 +154,15 @@ def evolve(
         dataset.save(save_path)
         console.print(f"  Generated {len(dataset.all_examples)} synthetic examples")
         console.print(f"  Saved to {save_path}/")
+        # Mo local patch: report provenance here too, so the UI can tell the
+        # user this eval set was synthesized from the skill's own text — a
+        # self-referential loop — rather than silently showing nothing.
+        dataset_provenance = {
+            "source": "synthetic",
+            "counts": {"trajectory_neg": 0, "trajectory_pos": 0,
+                       "trajectory_unlabelled": 0, "synthetic": len(dataset.all_examples)},
+            "turns_mined": 0,
+        }
     elif dataset_path:
         dataset = EvalDataset.load(Path(dataset_path))
         console.print(f"  Loaded dataset: {len(dataset.all_examples)} examples")
@@ -461,6 +500,11 @@ def evolve(
     # key already exists above as an integer count, and runs produced before
     # this change still carry the int, so reusing the name would hand the
     # accept path a number to iterate over.
+    # Where the eval examples came from. This is what turns the run from a
+    # progress bar into something legible: "夜貘 read 6 negative trajectories,
+    # mostly about ignoring length constraints".
+    metrics["dataset"] = dataset_provenance
+
     metrics["holdout_pin_examples"] = [
         {"task_input": getattr(ex, "task_input", ""),
          "expected_behavior": getattr(ex, "expected_behavior", "")}
@@ -500,8 +544,9 @@ def evolve(
 @click.command()
 @click.option("--skill", required=True, help="Name of the skill to evolve")
 @click.option("--iterations", default=10, help="Number of GEPA iterations")
-@click.option("--eval-source", default="synthetic", type=click.Choice(["synthetic", "golden", "sessiondb"]),
-              help="Source for evaluation dataset")
+@click.option("--eval-source", default="synthetic",
+              type=click.Choice(["synthetic", "golden", "sessiondb", "trajectory", "mixed"]),
+              help="Source for evaluation dataset (trajectory/mixed mine Mo's own chat log)")
 @click.option("--dataset-path", default=None, help="Path to existing eval dataset (JSONL)")
 @click.option("--optimizer-model", default="openai/gpt-4.1", help="Model for GEPA reflections")
 @click.option("--eval-model", default="openai/gpt-4.1-mini", help="Model for evaluations")
