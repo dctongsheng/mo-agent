@@ -180,6 +180,25 @@ def revert(archive_dir: Path, target: Path, skill: str,
     # Snapshot what we're about to overwrite, so revert-of-revert works.
     new_version = snapshot(archive_dir, target, skill, meta={"kind": "pre-revert",
                                                             "reverted_to": version})
+
+    # A version recorded with existed=False means the skill did not exist yet —
+    # that's what a newly authored skill's v0001 looks like. Writing its (empty)
+    # text back would leave a zero-byte SKILL.md, which is worse than the skill
+    # being gone: the directory is still indexed, so the agent keeps offering a
+    # skill with no content. Reverting to "it didn't exist" must remove it.
+    meta = next((v for v in list_versions(archive_dir, skill)
+                 if v.get("version") == version), {})
+    if meta.get("existed") is False:
+        import shutil
+        target = Path(target)
+        try:
+            if target.parent.exists():
+                shutil.rmtree(target.parent)
+        except Exception as exc:
+            return False, f"回退失败（无法移除技艺目录）：{exc}"
+        set_head(archive_dir, skill, new_version, "")
+        return True, f"已回退到「尚不存在」（当前内容已存为 v{new_version:04d}）"
+
     apply_atomic(Path(target), text)
     set_head(archive_dir, skill, new_version, text)
     return True, f"已回退到 v{version:04d}（当前内容已存为 v{new_version:04d}）"

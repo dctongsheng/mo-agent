@@ -151,7 +151,13 @@ export const scheduleMolting = (port: number, note: string) =>
   moFetch(port, "/api/mo/moltings", { method: "POST", body: JSON.stringify({ note }) });
 
 // ---------- mo extension: Harness self-evolution (skills via GEPA) ----------
-export type EvolveStatus = { ready: boolean; reason: string; profile: string; optimizer_model: string; eval_model: string };
+export type PendingChange = { skill: string; version?: number; at: number; kind?: string };
+export type EvolveStatus = {
+  ready: boolean; reason: string; profile: string;
+  optimizer_model: string; eval_model: string;
+  /** Skills written to disk that the running gateway hasn't picked up yet. */
+  pending?: PendingChange[];
+};
 export type EvolveSkill = { name: string; description: string; size: number; path: string; builtin: boolean };
 export type EvolveRun = {
   id: string; skill: string; iterations: number; eval_source: string;
@@ -278,7 +284,10 @@ export const getEvolveRun = (port: number, id: string) => moFetch<EvolveRunDetai
 export type AcceptResult = {
   ok: true; applied_to: string; archive_version: number;
   pins: number; forced: boolean; gate_passed: boolean | null;
-  activation: "next_session";
+  /** Not "next session": the skills-index LRU cache key contains no mtime and
+   *  nothing clears it at session start, so a written skill is only picked up
+   *  by a fresh gateway process. */
+  activation: "next_start";
 };
 export type AcceptRefusal = {
   ok: false; error: "gate_failed" | "stale_baseline" | "no_candidate";
@@ -339,6 +348,7 @@ export type CuratorStatus = {
             pinned?: number; proposed?: number; retired?: number };
   /** Characters every skill contributes to the always-on system prompt. */
   index_chars: number; proposed_chars: number;
+  pending?: PendingChange[];
 };
 export type UsageRow = {
   name: string; provenance?: string; state?: string; pinned?: boolean;

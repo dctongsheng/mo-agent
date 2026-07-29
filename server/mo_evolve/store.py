@@ -78,6 +78,29 @@ class EvolveStore:
     def get_run(self, run_id: str) -> dict | None:
         return next((r for r in self.read_runs() if r["id"] == run_id), None)
 
+    # ---- pending activation ----
+    # Skill writes land on disk immediately but the running gateway keeps
+    # serving its cached skills index, so nothing takes effect until the next
+    # process start. This list is what lets every surface say how many changes
+    # are waiting rather than each one guessing.
+
+    def read_pending(self) -> list:
+        data = read_json(self.pending_file, [])
+        if isinstance(data, dict):
+            return [data]            # pre-list format: a single entry
+        return data if isinstance(data, list) else []
+
+    def add_pending(self, entry: dict) -> int:
+        with self.lock:
+            items = [i for i in self.read_pending()
+                     if i.get("skill") != entry.get("skill")]
+            items.append(entry)
+            write_json(self.pending_file, items)
+            return len(items)
+
+    def clear_pending(self) -> None:
+        write_json(self.pending_file, [])
+
     # ---- schedule ----
 
     def read_schedule(self) -> dict:

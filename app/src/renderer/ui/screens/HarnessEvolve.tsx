@@ -4,6 +4,7 @@ import { moPortOf } from "../../store/slices/gatewaySlice";
 import { useAppState } from "../appState";
 import { TapeCard } from "../components/TapeCard";
 import { ModelEvolve } from "./ModelEvolve";
+import { PendingRestart } from "../components/PendingRestart";
 import {
   getEvolveStatus, listEvolveSkills, runEvolve, listEvolveRuns, getEvolveRun,
   acceptEvolveRun, rejectEvolveRun, getEvolveSchedule, setEvolveSchedule, getEvolveRunLog,
@@ -146,7 +147,7 @@ export function HarnessEvolve() {
         setRefusal(null);
         setOpenRun(null);
         refresh();
-        setNotice(`已写回 · 存为 v${String(r.archive_version).padStart(4, "0")} · 下次新会话生效`);
+        setNotice(`已写回 · 存为 v${String(r.archive_version).padStart(4, "0")} · 下次启动生效`);
       } else {
         setRefusal(r.message);
       }
@@ -170,7 +171,7 @@ export function HarnessEvolve() {
     if (!moPort || !skill) return;
     if (!confirm(`把「${skill}」回退到 v${String(version).padStart(4, "0")}？当前内容会先存档。`)) return;
     revertSkill(moPort, skill, version).then((r) => {
-      setNotice(r.message + " · 下次新会话生效");
+      setNotice(r.message + " · 下次启动生效");
       loadVersions(skill);
     }).catch(() => setNotice("回退失败"));
   };
@@ -210,6 +211,7 @@ export function HarnessEvolve() {
         )}
       </div>
       <h2 style={{ margin: "8px 0 6px", fontFamily: "'Noto Serif SC', serif", fontSize: 21, fontWeight: 650 }}>夜貘会把自己的技艺,练得更趁手。</h2>
+      <PendingRestart port={moPort} pending={status?.pending} />
       <p style={{ margin: 0, fontSize: 13.5, lineHeight: 1.7, color: "var(--ink-2)", maxWidth: 640 }}>
         交给「分身·夜貘（进化）」:它用 GEPA 优化器反复打磨某个技能的 SKILL.md,生成候选先进暂存区。你看过 diff、点「采纳」,才会真正写回。
       </p>

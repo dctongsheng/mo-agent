@@ -22,7 +22,7 @@ from pathlib import Path
 
 from mo_evolve import gate as _gate
 from mo_evolve import skill_archive as _archive
-from mo_evolve.store import read_json, write_json
+from mo_evolve.store import read_json
 
 
 @dataclass
@@ -46,7 +46,7 @@ class AcceptResult:
     pins: int
     forced: bool
     gate_passed: bool | None
-    activation: str = "next_session"
+    activation: str = "next_start"
 
     def to_dict(self) -> dict:
         return {
@@ -124,10 +124,22 @@ def apply_run(
     # Donate the holdout to the skill's regression ratchet.
     pins = _gate.append_pins(store.pins_dir, skill, stamped) if stamped else 0
 
-    # No hot-swap: an in-flight session already built its prompt prefix. This
-    # marker is what lets the UI say 「下次新会话生效」 rather than implying the
-    # running conversation just changed under the user.
-    write_json(store.pending_file, {"skill": skill, "version": version, "at": now()})
+    # No hot-swap: an in-flight session already built its prompt prefix.
+    #
+    # This used to claim "next session". That was wrong. prompt_builder's
+    # layer-1 LRU key is (skills_dir, external_dirs, tools, toolsets, platform,
+    # disabled, compact_categories) — no manifest, no mtime — and the only
+    # callers of clear_skills_system_prompt_cache are write paths. Nothing
+    # clears it at session start, so an accepted skill actually takes effect at
+    # next gateway *process* start.
+    #
+    # We deliberately do NOT call clear_skills_system_prompt_cache here: that
+    # would let a mid-conversation turn rebuild its prefix, which is precisely
+    # the hot-swap this marker exists to avoid, and would throw away the
+    # provider-side prompt cache of a session already in flight. Say "next
+    # start" and offer a restart button instead.
+    store.add_pending({"skill": skill, "version": version, "at": now(),
+                       "kind": "evolve"})
 
     try:
         applied_to = str(Path(target).relative_to(store.hermes_root))

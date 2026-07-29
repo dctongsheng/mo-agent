@@ -96,15 +96,41 @@ def test_holdout_becomes_the_regression_ratchet(store, run_dir, target):
 
 
 def test_accept_does_not_hot_swap(store, run_dir, target):
-    """An in-flight session already built its prompt prefix; the UI must be able
-    to say 「下次新会话生效」 rather than implying the live turn just changed."""
+    """An in-flight session already built its prompt prefix.
+
+    `activation` says "next_start", not "next_session" — the skills-index LRU
+    key contains no mtime and nothing clears it at session start, so a written
+    skill is only picked up by a fresh gateway process. Claiming otherwise sent
+    users looking for an effect that wasn't there yet.
+    """
     _gate_file(run_dir, True)
     store.insert_run(_run(run_dir))
     res = apply_run(store, _run(run_dir), target)
 
-    assert res.activation == "next_session"
-    pending = read_json(store.pending_file, {})
-    assert pending["skill"] == "arxiv" and pending["version"] == 1
+    assert res.activation == "next_start"
+    pending = store.read_pending()
+    assert [p["skill"] for p in pending] == ["arxiv"]
+    assert pending[0]["version"] == 1
+
+
+def test_pending_accumulates_across_accepts(store, run_dir, target, make_skill):
+    """Every surface reports one number — 「有 N 项改动等下次启动生效」 — so the
+    marker has to hold more than the most recent write."""
+    _gate_file(run_dir, True)
+    store.insert_run(_run(run_dir))
+    apply_run(store, _run(run_dir), target)
+
+    other = make_skill("other")
+    store.add_pending({"skill": "other", "version": 1, "at": 1.0, "kind": "curate"})
+
+    assert {p["skill"] for p in store.read_pending()} == {"arxiv", "other"}
+
+
+def test_pending_reads_the_pre_list_format(store):
+    """Installs that accepted a run before this change hold a bare object."""
+    from mo_evolve.store import write_json
+    write_json(store.pending_file, {"skill": "old", "version": 3, "at": 1.0})
+    assert [p["skill"] for p in store.read_pending()] == ["old"]
 
 
 def test_head_tracks_the_applied_text(store, run_dir, target):
@@ -245,7 +271,7 @@ def test_a_legacy_run_with_an_int_holdout_count_does_not_half_apply(store, run_d
     assert res.pins == 0
     assert target.read_text(encoding="utf-8") == EVOLVED
     assert store.get_run("r1")["status"] == "accepted"
-    assert read_json(store.pending_file, {}).get("skill") == "arxiv"
+    assert [p["skill"] for p in store.read_pending()] == ["arxiv"]
 
 
 def test_malformed_pin_examples_are_skipped_not_fatal(store, run_dir, target):

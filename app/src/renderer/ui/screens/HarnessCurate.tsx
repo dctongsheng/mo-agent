@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useState } from "react";
 import { useAppSelector } from "../../store/hooks";
 import { moPortOf } from "../../store/slices/gatewaySlice";
 import { TapeCard } from "../components/TapeCard";
+import { PendingRestart } from "../components/PendingRestart";
 import {
   getCuratorStatus, listCuratorSkills, listRetirements, retireSkill, keepSkill,
   listArchivedSkills, restoreArchivedSkill, setCuratorPaused, runCurator,
@@ -89,6 +90,8 @@ export function HarnessCurate() {
         上游的管家会在方子闲置 90 天后自己把它收进箱底 —— 不问、不留痕迹。
         Mo 把这一步改成了提案：收不收，你说了算。收起来的方子只是移进 <code>.archive/</code>，从不删除。
       </p>
+
+      <PendingRestart port={moPort} pending={status?.pending} />
 
       {/* A guard that silently failed to install would leave the UI claiming
           protection that isn't there. Say so loudly. */}

@@ -760,7 +760,11 @@ def _mount_mo_routes(app) -> None:
         ok, why = _engine_ready()
         opt, ev = _evolve_models()
         return {"ready": ok, "reason": why, "profile": EVOLVER_PROFILE,
-                "optimizer_model": opt, "eval_model": ev}
+                "optimizer_model": opt, "eval_model": ev,
+                # Written skills sit on disk while the running gateway serves
+                # its cached index — every surface reports the same number so
+                # the user isn't told three different things.
+                "pending": _store.read_pending()}
 
     @router.get("/evolve/skills")
     def evolve_skills():
@@ -886,7 +890,7 @@ def _mount_mo_routes(app) -> None:
 
     @router.get("/curator/status")
     def curator_status():
-        return _curator.status(_store)
+        return {**_curator.status(_store), "pending": _store.read_pending()}
 
     @router.get("/curator/skills")
     def curator_skills():
@@ -923,6 +927,10 @@ def _mount_mo_routes(app) -> None:
         ok, msg = _curator.apply_retirement(_store, skill)
         if not ok:
             raise HTTPException(400, msg)
+        # archive_skill doesn't clear the skills-index cache either, so the
+        # running process keeps advertising a skill whose directory just moved
+        # — skill_view on it would fail. Same "next start" contract as accept.
+        _store.add_pending({"skill": skill, "at": time.time(), "kind": "retire"})
         return {"ok": True, "message": msg, "activation": "next_start"}
 
     @router.post("/curator/proposals/{skill}/keep")
@@ -946,6 +954,7 @@ def _mount_mo_routes(app) -> None:
         ok, msg = _curator.restore(_store, skill)
         if not ok:
             raise HTTPException(400, msg)
+        _store.add_pending({"skill": skill, "at": time.time(), "kind": "restore"})
         return {"ok": True, "message": msg,
                 "drifted_from_head": _curator.drifted_from_head(_store, skill),
                 "activation": "next_start"}
@@ -1052,7 +1061,7 @@ def _mount_mo_routes(app) -> None:
             raise HTTPException(400, msg)
         _write_json(_store.pending_file, {"skill": skill, "at": time.time(),
                                           "reverted": True})
-        return {"ok": True, "message": msg, "activation": "next_session"}
+        return {"ok": True, "message": msg, "activation": "next_start"}
 
     @router.post("/evolve/runs/{run_id}/reject")
     def evolve_reject(run_id: str):

@@ -167,3 +167,38 @@ def test_skill_name_is_sanitized_into_the_archive_dir(tmp_path):
     snapshot(arch, _skill(tmp_path), "../../evil")
     assert not (tmp_path.parent / "evil").exists()
     assert any(arch.iterdir())
+
+
+def test_reverting_to_a_version_that_never_existed_removes_the_skill(tmp_path):
+    """A skill authored from scratch has v0001 = "" with existed: False.
+
+    Writing that text back would leave a zero-byte SKILL.md — worse than the
+    skill being gone, because the directory is still indexed and the agent
+    keeps offering a skill with no content.
+    """
+    arch = tmp_path / "archive"
+    target = tmp_path / "skills" / "brand-new" / "SKILL.md"
+
+    v0 = snapshot(arch, target, "brand-new")           # nothing there yet
+    assert list_versions(arch, "brand-new")[0]["existed"] is False
+
+    apply_atomic(target, "---\nname: brand-new\ndescription: d\n---\n\nbody\n")
+    set_head(arch, "brand-new", v0, "…")
+
+    ok, msg = revert(arch, target, "brand-new", version=v0)
+
+    assert ok, msg
+    assert not target.exists(), "an empty SKILL.md was left behind"
+    assert not target.parent.exists(), "the skill directory was left behind"
+
+
+def test_reverting_a_real_version_still_writes_text(tmp_path):
+    """Guard the fix from over-reaching onto normal reverts."""
+    arch = tmp_path / "archive"
+    target = _skill(tmp_path, "V1")
+    snapshot(arch, target, "arxiv")
+    apply_atomic(target, "V2")
+
+    ok, _ = revert(arch, target, "arxiv", version=1)
+    assert ok
+    assert target.read_text(encoding="utf-8") == "V1"

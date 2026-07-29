@@ -246,7 +246,11 @@ Accepting a run:
 
 Every version is listed in the app with a one-click revert, and a revert is itself snapshotted first, so revert-of-revert works.
 
-**No hot-swap.** An in-flight session has already built its prompt prefix; `system_prompt.py` notes that changing a stable-tier input mid-session busts the static-prefix rebuild and drops the request to an uncached layout. The next `skill_view` in that conversation would also return text the turn wasn't planned against. So the UI reports 「下次新会话生效」 rather than implying the running conversation just changed underneath you.
+**No hot-swap.** An in-flight session has already built its prompt prefix; `system_prompt.py` notes that changing a stable-tier input mid-session busts the static-prefix rebuild and drops the request to an uncached layout. The next `skill_view` in that conversation would also return text the turn wasn't planned against.
+
+**When it actually takes effect: the next gateway process start.** This doc previously said 「下次新会话生效」, and that was wrong. `prompt_builder.py`'s layer-1 LRU cache key is `(skills_dir, external_dirs, tools, toolsets, platform, disabled, compact_categories)` — no manifest, no mtime — and the only callers of `clear_skills_system_prompt_cache` are write paths. Nothing clears it when a session begins, so a fresh conversation in a running gateway still sees the old index.
+
+Calling `clear_skills_system_prompt_cache` on accept would fix the label and break the thing the label protects: a mid-conversation turn would rebuild its prefix and throw away the provider-side prompt cache of a session already in flight. So Mo says what's true — 「下次启动生效」 — and offers a restart button. `skill_usage.archive_skill()` has the same property, so retiring a skill carries the same notice: until the restart, the running process still advertises a skill whose directory has moved, and `skill_view` on it would fail.
 
 ## What 夜貘 cannot do yet
 
