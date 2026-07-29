@@ -1,5 +1,5 @@
-import React from "react";
-import { useAppState, type Screen } from "../appState";
+import React, { useMemo, useState } from "react";
+import { useAppState, type Screen, type Session } from "../appState";
 import { Toggle } from "../components/Toggle";
 import { useAppSelector } from "../../store/hooks";
 
@@ -11,6 +11,43 @@ const NAV: Array<{ key: Screen; num: string; label: string; en: string }> = [
   { key: "skills",   num: "伍", label: "技艺",   en: "SKILLS" },
   { key: "settings", num: "陆", label: "设置",   en: "MISC" },
 ];
+
+/** Sessions are almost never named, so a flat list reads as a wall of
+ *  「未命名的一页」 and the only distinguishing mark — the date — is repeated on
+ *  every row. Bucketing by age puts that information in one place and lets the
+ *  older ones fold away. */
+const BUCKETS: Array<{ key: string; label: string; within: number }> = [
+  { key: "today", label: "今天", within: 0 },
+  { key: "yesterday", label: "昨天", within: 1 },
+  { key: "week", label: "过去 7 天", within: 7 },
+  { key: "older", label: "更早", within: Infinity },
+];
+
+function daysAgo(startedAt: number): number {
+  const d = new Date(startedAt * 1000);
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const that = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  return Math.max(0, Math.round((today.getTime() - that.getTime()) / 86_400_000));
+}
+
+function bucketOf(startedAt: number): string {
+  const n = daysAgo(startedAt);
+  for (const b of BUCKETS) if (n <= b.within) return b.key;
+  return "older";
+}
+
+const COLLAPSE_KEY = "mo.sessionGroups.collapsed";
+
+function loadCollapsed(): Record<string, boolean> {
+  try {
+    return JSON.parse(localStorage.getItem(COLLAPSE_KEY) || "{}") || {};
+  } catch {
+    // Default: only the two recent buckets open. Everything older starts
+    // folded, which is the point of grouping in the first place.
+    return {};
+  }
+}
 
 const FALLBACK_PROFILE = {
   id: "default", name: "本体 · 小貘", glyph: "貘", form: 0 as const,
@@ -25,6 +62,36 @@ export function Sidebar() {
   // The serving model is global config — always show the live value
   const modelOf = (p: { isHost: boolean; model: string }) =>
     p.isHost && s.currentModel ? s.currentModel.model : p.model;
+
+  const [collapsedMap, setCollapsedMap] = useState<Record<string, boolean>>(loadCollapsed);
+  const toggleGroup = (key: string) => {
+    setCollapsedMap((prev) => {
+      const next = { ...prev, [key]: !(prev[key] ?? (key === "older")) };
+      try { localStorage.setItem(COLLAPSE_KEY, JSON.stringify(next)); } catch { /* private mode */ }
+      return next;
+    });
+  };
+
+  // Empty buckets are dropped rather than shown at zero — a 「昨天 0」 heading
+  // is a row that tells you nothing.
+  const groups = useMemo(() => {
+    const byKey = new Map<string, Session[]>();
+    for (const sess of s.sessions) {
+      const k = bucketOf(sess.startedAt);
+      const arr = byKey.get(k);
+      if (arr) arr.push(sess); else byKey.set(k, [sess]);
+    }
+    return BUCKETS
+      .map((b) => ({ ...b, items: byKey.get(b.key) ?? [] }))
+      .filter((g) => g.items.length > 0);
+  }, [s.sessions]);
+
+  // Whichever group holds the open session stays expanded — folding the page
+  // you're currently looking at is never what you meant.
+  const activeGroup = useMemo(() => {
+    const cur = s.sessions.find((x) => x.id === s.currentSessionId);
+    return cur ? bucketOf(cur.startedAt) : null;
+  }, [s.sessions, s.currentSessionId]);
 
   return (
     <div style={{
@@ -153,23 +220,58 @@ export function Sidebar() {
         {s.sessionsLoaded && s.sessions.length === 0 && (
           <div style={{ padding: "8px 10px", fontSize: 11.5, color: "var(--ink-3)" }}>还没有卷宗,点 ＋ 开一页</div>
         )}
-        {s.sessions.map((sess) => {
-          const active = sess.id === s.currentSessionId;
+        {groups.map(({ key, label, items }) => {
+          // A group is open unless explicitly folded, except 更早 which starts
+          // folded — it's the one that grows without bound.
+          const collapsed = key === activeGroup
+            ? false
+            : (collapsedMap[key] ?? (key === "older"));
           return (
-            <div
-              key={sess.id}
-              onClick={() => s.selectSession(sess.id)}
-              style={{
-                display: "flex", alignItems: "center", gap: 8, padding: "8px 10px",
-                borderRadius: 8, background: active ? "var(--card)" : "transparent", cursor: "pointer",
-              }}
-            >
-              <span style={{ flex: 1, minWidth: 0, fontSize: 12.5, fontWeight: active ? 600 : 400, color: active ? "var(--ink)" : "var(--ink-2)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{sess.title}</span>
-              <span style={{ fontSize: 9, color: "var(--ink-3)", fontFamily: "'JetBrains Mono', monospace", flexShrink: 0 }}>{sess.time}</span>
+            <div key={key} style={{ marginBottom: 2 }}>
               <button
-                onClick={(e) => { e.stopPropagation(); s.deleteSession(sess.id); }}
-                style={{ width: 16, height: 16, flexShrink: 0, border: "none", background: "transparent", color: "var(--ink-3)", opacity: 0.45, cursor: "pointer", fontSize: 12, lineHeight: 1, padding: 0 }}
-              >×</button>
+                onClick={() => toggleGroup(key)}
+                style={{
+                  width: "100%", display: "flex", alignItems: "center", gap: 7,
+                  padding: "6px 10px", border: "none", background: "transparent",
+                  cursor: "pointer", color: "var(--ink-2)", textAlign: "left",
+                }}
+              >
+                <span style={{
+                  fontSize: 9, color: "var(--ink-3)", flexShrink: 0, width: 8,
+                  display: "inline-block",
+                  transform: collapsed ? "rotate(0deg)" : "rotate(90deg)",
+                  transition: "transform .12s ease",
+                }}>▶</span>
+                <span style={{ flex: 1, fontSize: 12, fontWeight: 600 }}>{label}</span>
+                <span style={{ fontSize: 10.5, color: "var(--ink-3)", fontFamily: "'JetBrains Mono', monospace" }}>{items.length}</span>
+              </button>
+
+              {!collapsed && items.map((sess) => {
+                const active = sess.id === s.currentSessionId;
+                return (
+                  <div
+                    key={sess.id}
+                    onClick={() => s.selectSession(sess.id)}
+                    style={{
+                      display: "flex", alignItems: "center", gap: 8,
+                      padding: "7px 10px 7px 25px",
+                      borderRadius: 8, background: active ? "var(--card)" : "transparent", cursor: "pointer",
+                    }}
+                  >
+                    <span style={{ flex: 1, minWidth: 0, fontSize: 12.5, fontWeight: active ? 600 : 400, color: active ? "var(--ink)" : "var(--ink-2)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{sess.title}</span>
+                    {/* The date is the group heading inside 今天/昨天, so
+                        repeating it on every row is noise. Older buckets span
+                        many days, where it still earns its place. */}
+                    {(key === "week" || key === "older") && (
+                      <span style={{ fontSize: 9, color: "var(--ink-3)", fontFamily: "'JetBrains Mono', monospace", flexShrink: 0 }}>{sess.time}</span>
+                    )}
+                    <button
+                      onClick={(e) => { e.stopPropagation(); s.deleteSession(sess.id); }}
+                      style={{ width: 16, height: 16, flexShrink: 0, border: "none", background: "transparent", color: "var(--ink-3)", opacity: 0.45, cursor: "pointer", fontSize: 12, lineHeight: 1, padding: 0 }}
+                    >×</button>
+                  </div>
+                );
+              })}
             </div>
           );
         })}

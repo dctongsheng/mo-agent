@@ -26,6 +26,9 @@ export type Session = {
   id: string;
   title: string;
   time: string;
+  /** Raw epoch seconds. The formatted `time` can't be grouped on — the sidebar
+   *  buckets sessions by age, and "6/23" doesn't tell you which bucket. */
+  startedAt: number;
 };
 
 type AppState = {
@@ -135,6 +138,7 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
         id: s.id,
         title: s.title?.trim() || "未命名的一页",
         time: gw.formatSessionTime(s.started_at),
+        startedAt: s.started_at,
       })));
       setSessionsLoaded(true);
     } catch { /* gateway still warming up */ }
@@ -250,7 +254,8 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
     try {
       const s = await gw.createSession(api);
       setCurrentSessionId((prev) => { commitPrev(prev); return s.id; });
-      setSessions((ss) => [{ id: s.id, title: "未命名的一页", time: "今天" }, ...ss]);
+      setSessions((ss) => [{ id: s.id, title: "未命名的一页", time: "今天",
+                            startedAt: Date.now() / 1000 }, ...ss]);
       setScreen("home");
       return s.id;
     } catch {
