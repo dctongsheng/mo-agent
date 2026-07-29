@@ -338,6 +338,69 @@ export const rejectEvolveRun = (port: number, id: string) =>
 export const getEvolveRunLog = (port: number, id: string, tail = 400) =>
   moFetch<{ data: string; exists: boolean; total_lines?: number; error?: string }>(
     port, `/api/mo/evolve/runs/${encodeURIComponent(id)}/log?tail=${tail}`);
+// ---------- mo extension: 待办 (pending inbox) ----------
+// Staged skill/memory writes, retirement proposals and learn drafts are the
+// same object: something the agent wants to change about itself, waiting on you.
+export type PendingKind = "skills-write" | "memory-write" | "retirement" | "learn-draft";
+export type PendingItem = {
+  kind: PendingKind; id: string; title: string; summary: string;
+  /** `background_review` = written by the fork that runs every ~10 turns. */
+  origin: "foreground" | "background_review" | "curator";
+  at: number; subsystem?: string; action?: string;
+  days_idle?: number | null; skill_md_chars?: number;
+};
+export type ReviewSettings = { memory_nudge_interval: number | null; skill_nudge_interval: number | null };
+export type PendingList = {
+  data: PendingItem[];
+  counts: Record<string, number>;
+  background_only: boolean; shim_installed: boolean;
+  review: ReviewSettings;
+};
+export type ReviewLogEntry = { at: number; model?: string; actions: string[] };
+
+export const listPending = (port: number) => moFetch<PendingList>(port, "/api/mo/pending");
+export const getPendingDetail = (port: number, subsystem: string, id: string) =>
+  moFetch<any>(port, `/api/mo/pending/${subsystem}/${encodeURIComponent(id)}`);
+export const approvePending = (port: number, subsystem: string, id: string) =>
+  moFetch<{ ok: boolean; message: string; activation: string }>(
+    port, `/api/mo/pending/${subsystem}/${encodeURIComponent(id)}/approve`, { method: "POST" });
+export const rejectPending = (port: number, subsystem: string, id: string) =>
+  moFetch<{ ok: boolean }>(port, `/api/mo/pending/${subsystem}/${encodeURIComponent(id)}/reject`, { method: "POST" });
+export const setPendingPolicy = (port: number, background_only: boolean) =>
+  moFetch<{ ok: boolean; background_only: boolean }>(
+    port, "/api/mo/pending/policy", { method: "PUT", body: JSON.stringify({ background_only }) });
+export const getReviewLog = (port: number, limit = 50) =>
+  moFetch<{ data: ReviewLogEntry[]; settings: ReviewSettings }>(
+    port, `/api/mo/pending/review-log?limit=${limit}`);
+export const setReviewIntervals = (port: number, patch: { memory?: number; skills?: number }) =>
+  moFetch<{ ok: boolean; settings: ReviewSettings }>(
+    port, "/api/mo/pending/review-intervals", { method: "PUT", body: JSON.stringify(patch) });
+
+// ---------- Hermes core endpoints Mo consumes read-only ----------
+// Both already exist upstream and are reachable through Mo's dashboard port —
+// no new backend. Deletion is deliberately NOT wired: DELETE /api/learning/node
+// archives the skill AND clears the prompt cache, i.e. it hot-swaps. Retiring
+// goes through the curator proposal path instead.
+export type LearningGraph = {
+  nodes: { id: string; label: string; kind: string; category?: string;
+           useCount?: number; state?: string; createdBy?: string | null; pinned?: boolean }[];
+  edges: { source: string; target: string }[];
+  clusters: { category: string; count: number }[];
+  memory: any[];
+  stats: Record<string, any>;
+};
+export const getLearningGraph = (port: number) =>
+  moFetch<LearningGraph>(port, "/api/learning/graph");
+
+export type UsageAnalytics = {
+  daily: { day: string; input_tokens: number; output_tokens: number;
+           cache_read_tokens: number; estimated_cost: number; actual_cost: number;
+           sessions: number; api_calls: number }[];
+  [k: string]: any;
+};
+export const getUsageAnalytics = (port: number, days = 30) =>
+  moFetch<UsageAnalytics>(port, `/api/analytics/usage?days=${days}`);
+
 // ---------- mo extension: 教它一手 (/learn) ----------
 export type LearnStatus = {
   ready: boolean; reason: string;

@@ -4,9 +4,11 @@ import { moPortOf } from "../../store/slices/gatewaySlice";
 import { useAppState } from "../appState";
 import { GrowthRings } from "../components/GrowthRings";
 import { TapeCard } from "../components/TapeCard";
+import { HarnessInbox } from "./HarnessInbox";
 import { HarnessLearn } from "./HarnessLearn";
 import { HarnessEvolve } from "./HarnessEvolve";
 import { HarnessCurate } from "./HarnessCurate";
+import { HarnessLedger } from "./HarnessLedger";
 import {
   getEvolutionStats, listTrajectories, labelTrajectory, scheduleMolting,
   EvolutionStats, Trajectory,
@@ -169,9 +171,11 @@ export function EvolveScreen() {
       </div>
 
       {/* Harness self-evolution (skills via GEPA) */}
+      <HarnessInbox />
       <HarnessLearn />
       <HarnessEvolve />
       <HarnessCurate />
+      <HarnessLedger />
     </div>
   );
 }

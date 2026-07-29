@@ -66,7 +66,9 @@ def test_mo_routes_are_reachable_past_the_catchall(gateway, app_with_catchall):
     for path in ("/api/mo/evolve/status", "/api/mo/evolve/calibration",
                  "/api/mo/evolve/plans", "/api/mo/evolve/schedule",
                  "/api/mo/curator/status", "/api/mo/curator/proposals",
-                 "/api/mo/curator/skills", "/api/mo/curator/archived"):
+                 "/api/mo/curator/skills", "/api/mo/curator/archived",
+                 "/api/mo/learn/status", "/api/mo/learn/drafts",
+                 "/api/mo/pending", "/api/mo/pending/review-log"):
         res = client.get(path)
         assert res.status_code == 200, f"{path} -> {res.status_code}"
         assert "No such API endpoint" not in str(res.json()), (

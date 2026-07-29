@@ -523,6 +523,7 @@ def _mount_mo_routes(app) -> None:
     from mo_evolve import verify as _verify
     from mo_evolve import curator as _curator
     from mo_evolve import learn as _learn
+    from mo_evolve import inbox as _inbox
 
     _store = EvolveStore(_hermes_root)
     _evolve_lock = _store.lock  # also serializes the fine-tune run ledger below
@@ -559,6 +560,30 @@ def _mount_mo_routes(app) -> None:
                 log.error("curator clamp also failed: %s", exc)
 
     _install_curator_guard()
+
+    def _install_inbox_shims() -> None:
+        """Background-fork writes go to the 待办 list; foreground stays instant.
+
+        background_review.py forks a second agent every ~10 turns and writes
+        memories and skills straight to disk, with no history and no off switch.
+        By Mo's standards that's a bigger unconsented-write surface than the
+        90-day timer — it fires every ten turns.
+        """
+        log = logging.getLogger("hermes.desktop")
+        try:
+            ok, why = _inbox.install_gate_shim()
+            log.info("write-approval shim: %s", why) if ok else log.warning(
+                "write-approval shim not installed: %s", why)
+        except Exception as exc:
+            log.warning("write-approval shim failed: %s", exc)
+        try:
+            ok, why = _inbox.install_review_recorder(_store)
+            log.info("background-review recorder: %s", why) if ok else log.warning(
+                "background-review recorder not installed: %s", why)
+        except Exception as exc:
+            log.warning("background-review recorder failed: %s", exc)
+
+    _install_inbox_shims()
 
     # Eval/optimizer models route through DSPy→LiteLLM at the OpenAI-compatible
     # endpoint configured for the gateway (OPENAI_API_BASE/KEY). Fall back to
@@ -1065,6 +1090,75 @@ def _mount_mo_routes(app) -> None:
         total = len(lines)
         return {"data": "\n".join(lines[-tail:] if tail else lines),
                 "exists": True, "total_lines": total}
+
+    # ---- 待办 (pending inbox) ----
+    # Staged skill/memory writes, retirement proposals and learn drafts are the
+    # same object: something the agent wants to change about itself, waiting on
+    # you. Upstream has a complete file-backed model for the first two and no
+    # HTTP surface at all.
+
+    @router.get("/pending")
+    def pending_list():
+        return {"data": _inbox.list_all(_store),
+                "counts": _inbox.counts(_store),
+                "background_only": _inbox.background_only_enabled(),
+                "shim_installed": _inbox.shim_installed(),
+                "review": _inbox.review_settings()}
+
+    @router.get("/pending/{subsystem}/{pending_id}")
+    def pending_detail(subsystem: str, pending_id: str):
+        if subsystem not in ("skills", "memory"):
+            raise HTTPException(400, "unknown subsystem")
+        rec = _inbox.detail(subsystem, pending_id)
+        if not rec:
+            raise HTTPException(404, "not found")
+        return rec
+
+    @router.post("/pending/{subsystem}/{pending_id}/approve")
+    def pending_approve(subsystem: str, pending_id: str):
+        if subsystem not in ("skills", "memory"):
+            raise HTTPException(400, "unknown subsystem")
+        ok, msg = _inbox.approve(subsystem, pending_id)
+        if not ok:
+            raise HTTPException(400, msg)
+        # apply_skill_pending clears the skills-prompt cache, but the running
+        # process still needs a restart for the index to rebuild.
+        _store.add_pending({"skill": pending_id, "at": time.time(),
+                            "kind": f"{subsystem}-write"})
+        return {"ok": True, "message": msg, "activation": "next_start"}
+
+    @router.post("/pending/{subsystem}/{pending_id}/reject")
+    def pending_reject(subsystem: str, pending_id: str):
+        if subsystem not in ("skills", "memory"):
+            raise HTTPException(400, "unknown subsystem")
+        ok, msg = _inbox.reject(subsystem, pending_id)
+        return {"ok": ok, "message": msg}
+
+    @router.put("/pending/policy")
+    async def pending_policy(request: Request):
+        body = await request.json()
+        want = bool(body.get("background_only", True))
+        ok, msg = (_inbox.enable_background_only() if want
+                   else _inbox.disable_background_only())
+        if not ok:
+            raise HTTPException(400, msg)
+        return {"ok": True, "background_only": _inbox.background_only_enabled()}
+
+    @router.get("/pending/review-log")
+    def pending_review_log(limit: int = 50):
+        return {"data": _inbox.read_review_log(_store, limit),
+                "settings": _inbox.review_settings()}
+
+    @router.put("/pending/review-intervals")
+    async def pending_review_intervals(request: Request):
+        body = await request.json()
+        def _i(k):
+            v = body.get(k)
+            return max(0, min(10000, int(v))) if v is not None else None
+        ok, msg = _inbox.set_review_intervals(_i("memory"), _i("skills"))
+        if not ok:
+            raise HTTPException(400, msg)
+        return {"ok": True, "settings": _inbox.review_settings()}
 
     # ---- curation (清点技艺) ----
     # Hermes' curator decides what's dead weight; Mo decides nothing without
