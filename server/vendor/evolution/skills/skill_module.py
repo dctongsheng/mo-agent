@@ -115,7 +115,14 @@ class SkillModule(dspy.Module):
 
     def forward(self, task_input: str) -> dspy.Prediction:
         result = self.predictor(task_input=task_input)
-        return dspy.Prediction(output=getattr(result, "output", ""))
+        # Mo local patch: carry the candidate's current skill text on the
+        # prediction. A DSPy metric is only handed (gold, pred, trace, ...) —
+        # without this the LLM judge cannot see which skill produced the output
+        # and cannot score procedure-following or apply a length penalty.
+        return dspy.Prediction(
+            output=getattr(result, "output", ""),
+            skill_text=self.skill_text,
+        )
 
 
 def reassemble_skill(frontmatter: str, evolved_body: str) -> str:

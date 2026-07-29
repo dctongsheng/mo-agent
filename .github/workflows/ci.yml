@@ -57,6 +57,22 @@ jobs:
             import evolution.skills.evolve_skill; \
             print('evolution engine OK')"
 
+  evolution-tests:
+    name: Self-evolution — unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      # Same dependency story as the `engine` job: dspy is not a Hermes dep.
+      # No test in this suite touches the network — the LLM judge is faked.
+      - name: Install engine dependencies
+        run: pip install "dspy>=3.2" "rich" "click" "pytest"
+      - name: Run tests
+        working-directory: server
+        run: python -m pytest tests
+
   gateway:
     name: Gateway — syntax check
     runs-on: ubuntu-latest

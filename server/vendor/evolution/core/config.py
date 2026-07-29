@@ -39,6 +39,22 @@ class EvolutionConfig:
     val_ratio: float = 0.25
     holdout_ratio: float = 0.25
 
+    # Mo local patch: tiered fitness. Upstream scores every candidate with a
+    # bag-of-words overlap heuristic and never instantiates its own LLMJudge.
+    # "tiered" runs the free heuristic first and escalates to the judge only
+    # when the score is poor — GEPA's reflective mutation only reads feedback
+    # for candidates it wants to improve, so judging the winners buys nothing.
+    metric_mode: str = "tiered"          # heuristic | tiered | judge
+    judge_escalate_below: float = 0.85   # heuristic score below which we judge
+    judge_max_calls: int = 0             # 0 → 4 × max_metric_calls
+    judge_cache: bool = True
+
+    # Mo local patch: acceptance gate. Upstream's "improvement > 0" is printed,
+    # never enforced, and computed on the keyword proxy above.
+    min_holdout: int = 5                 # fewer holdout examples → no verdict
+    min_effect: float = 0.02             # CI lower bound must clear this
+    regression_tolerance: float = 0.02   # max regression on the pin set
+
     # Benchmark gating
     run_pytest: bool = True
     run_tblite: bool = False  # Expensive — opt-in
