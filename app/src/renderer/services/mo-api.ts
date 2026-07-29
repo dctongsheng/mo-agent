@@ -90,8 +90,23 @@ export const testApiKey = (port: number, provider: string, value: string) =>
     method: "POST",
     body: JSON.stringify({ provider, value }),
   });
-export const restartGateway = (port: number) =>
-  moFetch(port, "/api/gateway/restart", { method: "POST" });
+/** Restart the gateway Electron spawned.
+ *
+ *  Deliberately NOT Hermes' /api/gateway/restart: that shells out to
+ *  `hermes gateway restart`, which targets a different process from the one
+ *  the desktop app runs. It answers {"ok": true} and changes nothing — the
+ *  button appeared to do nothing because it genuinely did nothing.
+ *
+ *  This exits with code 75, which python-bridge.ts already watches for and
+ *  respawns on. The socket drops as the process goes away, so a network error
+ *  here is the expected success path. */
+export const restartGateway = async (port: number): Promise<{ ok: boolean }> => {
+  try {
+    return await moFetch<{ ok: boolean }>(port, "/api/mo/restart", { method: "POST" });
+  } catch {
+    return { ok: true };
+  }
+};
 
 // ---------- mo extension: memory specimens ----------
 export type Specimen = {

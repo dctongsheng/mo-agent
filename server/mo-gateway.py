@@ -1091,6 +1091,36 @@ def _mount_mo_routes(app) -> None:
         return {"data": "\n".join(lines[-tail:] if tail else lines),
                 "exists": True, "total_lines": total}
 
+    # ---- restart ----
+    # Skill writes land on disk but the running process keeps serving its
+    # cached skills index, so changes need a fresh gateway. Electron already
+    # watches for exit code 75 (RESTART_EXIT_CODE in python-bridge.ts) and
+    # respawns — but nothing ever exited with it, so the path had no trigger.
+    #
+    # NOT /api/gateway/restart: that's Hermes' own endpoint and it shells out
+    # to `hermes gateway restart`, which is a different process from the one
+    # Electron spawned. It returns {"ok": true} and changes nothing here.
+    _RESTART_EXIT_CODE = 75
+
+    @router.post("/restart")
+    def mo_restart():
+        def _bye():
+            # Let the response flush before the process goes away, or the UI
+            # sees a connection reset and reports a failure for a restart that
+            # is in fact happening.
+            time.sleep(0.4)
+            os._exit(_RESTART_EXIT_CODE)
+
+        threading.Thread(target=_bye, daemon=True, name="mo-restart").start()
+        return {"ok": True, "restarting": True}
+
+    # Everything on disk is loaded as of this process start, so nothing is
+    # "waiting for a restart" any more.
+    try:
+        _store.clear_pending()
+    except Exception:
+        pass
+
     # ---- 待办 (pending inbox) ----
     # Staged skill/memory writes, retirement proposals and learn drafts are the
     # same object: something the agent wants to change about itself, waiting on

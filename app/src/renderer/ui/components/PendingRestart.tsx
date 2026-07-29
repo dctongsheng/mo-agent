@@ -22,7 +22,13 @@ export function PendingRestart({ port, pending }: { port: number | null; pending
     if (!port || busy) return;
     if (!confirm(`重启引擎让 ${pending.length} 项改动生效？进行中的对话会中断。`)) return;
     setBusy(true);
-    restartGateway(port).catch(() => {}).finally(() => setBusy(false));
+    // The gateway exits mid-request, so the socket drops — that IS the success
+    // path, and restartGateway swallows it. Electron respawns and broadcasts
+    // `python-ready`; hold the "restarting" state until then rather than
+    // flicking back to the button while the backend is still down.
+    restartGateway(port).finally(() => {
+      setTimeout(() => setBusy(false), 8000);
+    });
   };
 
   return (
