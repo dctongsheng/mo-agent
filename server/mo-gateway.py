@@ -507,10 +507,21 @@ def _mount_mo_routes(app) -> None:
     _hermes_root = Path(os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes")))
     _evolver_home = _hermes_root / "profiles" / EVOLVER_PROFILE
     _evolve_dir = _evolver_home / "evolve"
-    _runs_file = _evolve_dir / "runs.json"
     _schedule_file = _evolve_dir / "schedule.json"
-    _vendor_dir = Path(__file__).resolve().parent / "vendor"
-    _evolve_lock = threading.Lock()
+    _server_dir = Path(__file__).resolve().parent
+    _vendor_dir = _server_dir / "vendor"
+
+    # Run/schedule/skill-listing state lives in an importable module so it can
+    # be unit-tested — this file's name has a hyphen and everything below is
+    # inside a closure, so nothing here is reachable from a test.
+    if str(_server_dir) not in sys.path:
+        sys.path.insert(0, str(_server_dir))
+    from mo_evolve.store import EvolveStore
+    from mo_evolve import skill_archive as _archive
+    from mo_evolve import accept as _accept
+
+    _store = EvolveStore(_hermes_root)
+    _evolve_lock = _store.lock  # also serializes the fine-tune run ledger below
 
     # Eval/optimizer models route through DSPy→LiteLLM at the OpenAI-compatible
     # endpoint configured for the gateway (OPENAI_API_BASE/KEY). Fall back to
@@ -558,99 +569,17 @@ def _mount_mo_routes(app) -> None:
             return False, "技艺目录未就绪"
         return True, ""
 
-    _bundled_cache: dict = {}
+    # Skill listing, built-in classification and run bookkeeping now live in
+    # mo_evolve.store (importable → unit-tested). Evolution operates on the
+    # user's real skills dir (~/.hermes-mo/skills), where skills they author
+    # show up — not the evolver-profile clone. So a newly-created skill is
+    # immediately evolvable; accept writes back to the file the user owns.
+    _skills_dir = _store.skills_dir
+    _list_evolver_skills = _store.list_skills
 
-    def _bundled_skill_names() -> set:
-        """Names of skills that ship with Hermes (vs. user/self-authored).
-        Union of (a) the per-profile bundled manifest written at seed time and
-        (b) a full scan of the installed agent's bundle skills dir — recording
-        BOTH directory names and frontmatter names, since they often differ
-        (dir "audiocraft" vs name "audiocraft-audio-generation"). A stale
-        manifest alone misses a few skills, so we union both for recall.
-        Cached for the process lifetime."""
-        if "names" in _bundled_cache:
-            return _bundled_cache["names"]
-        names: set = set()
-        manifest = _hermes_root / "skills" / ".bundled_manifest"
-        try:
-            for line in manifest.read_text(encoding="utf-8").splitlines():
-                line = line.strip()
-                if line and not line.startswith("#"):
-                    names.add(line.split(":", 1)[0].strip())
-        except Exception:
-            pass
-        # Hermes ships skills under both skills/ and optional-skills/.
-        for root in (
-            Path(os.path.expanduser("~/.hermes/hermes-agent/skills")),
-            Path(os.path.expanduser("~/.hermes/hermes-agent/optional-skills")),
-            Path(os.environ.get("HERMES_AGENT_ROOT", "")) / "skills",
-            Path(os.environ.get("HERMES_AGENT_ROOT", "")) / "optional-skills",
-        ):
-            if not root.exists():
-                continue
-            for md in root.rglob("SKILL.md"):
-                names.add(md.parent.name)
-                try:
-                    for ln in md.read_text(encoding="utf-8")[:400].splitlines():
-                        s = ln.strip()
-                        if s.startswith("name:"):
-                            names.add(s.split(":", 1)[1].strip().strip("'\""))
-                            break
-                except Exception:
-                    pass
-        _bundled_cache["names"] = names
-        return names
-
-    # Evolution operates on the user's real skills dir (~/.hermes-mo/skills),
-    # where skills they author show up — not the evolver-profile clone. So a
-    # newly-created skill is immediately evolvable; accept writes back to the
-    # same file the user owns.
-    _skills_dir = _hermes_root / "skills"
-
-    def _list_evolver_skills() -> list:
-        out = []
-        sk = _skills_dir
-        if not sk.exists():
-            return out
-        bundled = _bundled_skill_names()
-        for md in sk.rglob("SKILL.md"):
-            try:
-                raw = md.read_text(encoding="utf-8")
-            except Exception:
-                continue
-            name = md.parent.name
-            desc = ""
-            for line in raw[:800].splitlines():
-                s = line.strip()
-                if s.startswith("name:"):
-                    name = s.split(":", 1)[1].strip().strip("'\"") or name
-                elif s.startswith("description:"):
-                    desc = s.split(":", 1)[1].strip().strip("'\"")
-            # Manifest keys are frontmatter skill names; the fallback bundle
-            # scan yields directory names. A skill is built-in if either matches
-            # (dir name often differs from the declared name, e.g. dir
-            # "audiocraft" vs name "audiocraft-audio-generation").
-            out.append({"name": name, "description": desc, "size": len(raw),
-                        "path": str(md.relative_to(_hermes_root)),
-                        "builtin": (name in bundled) or (md.parent.name in bundled)})
-        out.sort(key=lambda x: x["name"])
-        return out
-
-    def _read_runs() -> list:
-        return _read_json(_runs_file, [])
-
-    def _write_runs(runs: list) -> None:
-        _evolve_dir.mkdir(parents=True, exist_ok=True)
-        _write_json(_runs_file, runs)
-
-    def _update_run(run_id: str, **fields) -> None:
-        with _evolve_lock:
-            runs = _read_runs()
-            for r in runs:
-                if r["id"] == run_id:
-                    r.update(fields)
-                    break
-            _write_runs(runs)
+    _read_runs = _store.read_runs
+    _write_runs = _store.write_runs
+    _update_run = _store.update_run
 
     def _spawn_evolution(skill: str, iterations: int, eval_source: str) -> dict:
         ok, why = _engine_ready()
@@ -661,7 +590,13 @@ def _mount_mo_routes(app) -> None:
         run_cwd.mkdir(parents=True, exist_ok=True)
         opt_model, eval_model = _evolve_models()
         env = dict(os.environ)
-        env["PYTHONPATH"] = str(_vendor_dir) + os.pathsep + env.get("PYTHONPATH", "")
+        # The vendored engine imports `mo_evolve.*` defensively (try/except
+        # ImportError) for the tiered judge and the safety scan, so the server
+        # dir has to be on the subprocess path too — otherwise every run
+        # silently falls back to the keyword-overlap heuristic.
+        env["PYTHONPATH"] = os.pathsep.join(
+            [str(_vendor_dir), str(_server_dir)] + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else [])
+        )
         env["HERMES_AGENT_REPO"] = str(_hermes_root)  # find_skill scans ~/.hermes-mo/skills
         # Eval/optimizer go through DSPy→LiteLLM at an OpenAI-compatible
         # endpoint. Prefer explicit MO_EVOLVE_* overrides; otherwise reuse the
@@ -685,10 +620,7 @@ def _mount_mo_routes(app) -> None:
             "created_at": time.time(), "cwd": str(run_cwd),
             "opt_model": opt_model, "eval_model": eval_model,
         }
-        with _evolve_lock:
-            runs = _read_runs()
-            runs.insert(0, entry)
-            _write_runs(runs)
+        _store.insert_run(entry)
 
         def _runner():
             try:
@@ -709,13 +641,28 @@ def _mount_mo_routes(app) -> None:
             if latest and (latest / "evolved_skill.md").exists():
                 _update_run(run_id, status="done", output_dir=str(latest),
                             finished_at=time.time(), rc=rc)
-            else:
-                # pipeline may have written a FAILED variant or produced nothing
-                failed = out_root / "evolved_FAILED.md" if out_root.exists() else None
-                _update_run(run_id, status="failed",
-                            output_dir=str(latest) if latest else "",
-                            error="未产出 evolved_skill（见 run.log）",
+                return
+            # A candidate rejected by the hard constraints writes
+            # evolved_FAILED.md + failed_constraints.json directly under
+            # output/<skill>/ — no timestamped subdir, because the pipeline
+            # returns before creating one. Record that directory anyway: a run
+            # rejected *for* a prompt-injection finding is exactly the one whose
+            # findings someone needs to read, and without this it survived only
+            # as one line in run.log.
+            failed = (out_root / "evolved_FAILED.md") if out_root.exists() else None
+            if failed is not None and failed.exists():
+                reasons = _read_json(out_root / "failed_constraints.json", {})
+                bad = [c.get("name") for c in reasons.get("constraints", [])
+                       if not c.get("passed")]
+                _update_run(run_id, status="failed", output_dir=str(out_root),
+                            constraints_failed=True,
+                            error="候选未通过硬约束：" + ("、".join(bad) if bad else "见 run.log"),
                             finished_at=time.time(), rc=rc)
+                return
+            _update_run(run_id, status="failed",
+                        output_dir=str(latest) if latest else "",
+                        error="未产出 evolved_skill（见 run.log）",
+                        finished_at=time.time(), rc=rc)
 
         threading.Thread(target=_runner, daemon=True, name=f"evolve-{run_id}").start()
         return {"ok": True, "run_id": run_id}
@@ -758,49 +705,102 @@ def _mount_mo_routes(app) -> None:
         if out:
             od = Path(out)
             base = (od / "baseline_skill.md")
-            evo = (od / "evolved_skill.md")
             met = (od / "metrics.json")
             base_txt = base.read_text(encoding="utf-8") if base.exists() else ""
+
+            # A constraint-rejected run has no evolved_skill.md — its candidate
+            # is evolved_FAILED.md, one directory up from where a passing run
+            # would put things. Show it: the user still needs to see WHAT was
+            # rejected and why, especially for an injection finding.
+            evo = (od / "evolved_skill.md")
+            if not evo.exists() and (od / "evolved_FAILED.md").exists():
+                evo = od / "evolved_FAILED.md"
             evo_txt = evo.read_text(encoding="utf-8") if evo.exists() else ""
+
+            # The live skill stands in for the baseline when the pipeline never
+            # got far enough to save one, so the diff is still meaningful.
+            if not base_txt and evo_txt:
+                live = _store.find_skill_file(run["skill"])
+                if live:
+                    base_txt = live.read_text(encoding="utf-8")
+
             result["baseline"] = base_txt
             result["evolved"] = evo_txt
             result["metrics"] = _read_json(met, {}) if met.exists() else {}
+            result["gate"] = _read_json(od / "gate.json", None)
+
+            safety = _read_json(od / "safety.json", None)
+            failed = _read_json(od / "failed_constraints.json", None)
+            if failed:
+                result["constraints"] = failed.get("constraints", [])
+                # Findings from the rejected candidate live here, not in
+                # safety.json — the pipeline returns before writing that.
+                if failed.get("safety_findings"):
+                    safety = {"findings": failed["safety_findings"]}
+            result["safety"] = safety
             result["diff"] = "".join(difflib.unified_diff(
                 base_txt.splitlines(keepends=True),
                 evo_txt.splitlines(keepends=True),
                 fromfile="baseline", tofile="evolved",
             ))
+            # Has the live skill drifted from what this run started against?
+            # Accepting a stale candidate silently discards the user's edits.
+            tgt = _store.find_skill_file(run["skill"])
+            if tgt and base_txt:
+                result["stale_baseline"] = (
+                    _archive.sha256_file(tgt) != _archive.sha256_text(base_txt))
         return result
 
     @router.post("/evolve/runs/{run_id}/accept")
-    def evolve_accept(run_id: str):
-        runs = _read_runs()
-        run = next((r for r in runs if r["id"] == run_id), None)
+    async def evolve_accept(run_id: str, request: Request):
+        """Apply an evolved skill — but only past the gate, and never without a
+        way back.
+
+        Before: a bare `target.write_text(evolved)`. No backup, no rollback, no
+        significance check, and no comparison against what the file currently
+        holds — so a nightly run accepted hours later silently clobbered every
+        hand edit made in between.
+        """
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        run = _store.get_run(run_id)
         if not run or not run.get("output_dir"):
             raise HTTPException(404, "run or output not found")
-        evolved = Path(run["output_dir"]) / "evolved_skill.md"
-        if not evolved.exists():
-            raise HTTPException(400, "no evolved skill to apply")
-        # Find the target SKILL.md in the user's skills dir by skill name
-        # (matching either the directory name or the frontmatter name).
-        target = None
-        for md in _skills_dir.rglob("SKILL.md"):
-            if md.parent.name == run["skill"]:
-                target = md
-                break
-            try:
-                head = md.read_text(encoding="utf-8")[:400]
-                if any(line.strip() in (f"name: {run['skill']}", f"name: \"{run['skill']}\"", f"name: '{run['skill']}'") for line in head.splitlines()):
-                    target = md
-                    break
-            except Exception:
-                pass
+        target = _store.find_skill_file(run["skill"])
         if target is None:
             raise HTTPException(404, "target skill not found")
-        target.write_text(evolved.read_text(encoding="utf-8"), encoding="utf-8")
-        _update_run(run_id, status="accepted", applied_at=time.time(),
-                    applied_to=str(target.relative_to(_hermes_root)))
-        return {"ok": True, "applied_to": str(target)}
+        try:
+            result = _accept.apply_run(_store, run, target,
+                                       force=bool(body.get("force", False)))
+        except _accept.AcceptRefused as refused:
+            # 409 = "we can do this, but not without you saying so again."
+            raise HTTPException(409, detail=refused.to_detail())
+        return result.to_dict()
+
+    @router.get("/evolve/skills/{skill}/versions")
+    def evolve_skill_versions(skill: str):
+        return {"data": _archive.list_versions(_store.archive_dir, skill),
+                "head": _archive.read_head(_store.archive_dir, skill)}
+
+    @router.post("/evolve/skills/{skill}/revert")
+    async def evolve_skill_revert(skill: str, request: Request):
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        version = body.get("version")
+        target = _store.find_skill_file(skill)
+        if target is None:
+            raise HTTPException(404, "target skill not found")
+        ok, msg = _archive.revert(_store.archive_dir, target, skill,
+                                  int(version) if version is not None else None)
+        if not ok:
+            raise HTTPException(400, msg)
+        _write_json(_store.pending_file, {"skill": skill, "at": time.time(),
+                                          "reverted": True})
+        return {"ok": True, "message": msg, "activation": "next_session"}
 
     @router.post("/evolve/runs/{run_id}/reject")
     def evolve_reject(run_id: str):
@@ -888,20 +888,7 @@ def _mount_mo_routes(app) -> None:
     # (best-effort). When skill == "auto", rotate through the NON-built-in
     # (user/custom) skills in name order, one per scheduled run — so every
     # custom skill gets evolved in turn instead of always picking the biggest.
-    _auto_cursor_file = _evolve_dir / "auto_cursor.json"
-
-    def _next_auto_skill() -> str:
-        custom = sorted(s["name"] for s in _list_evolver_skills() if not s.get("builtin"))
-        if not custom:
-            return ""
-        last = _read_json(_auto_cursor_file, {}).get("last", "")
-        try:
-            nxt = custom[(custom.index(last) + 1) % len(custom)]
-        except ValueError:
-            nxt = custom[0]  # last not in current list → start from the first
-        _evolve_dir.mkdir(parents=True, exist_ok=True)
-        _write_json(_auto_cursor_file, {"last": nxt})
-        return nxt
+    _next_auto_skill = _store.next_auto_skill
 
     def _scheduler_loop():
         last_fire_day = None

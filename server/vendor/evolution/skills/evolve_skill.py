@@ -30,6 +30,23 @@ from evolution.skills.skill_module import (
     reassemble_skill,
 )
 
+# Mo local patches live in an importable, unit-tested package alongside the
+# gateway. Guarded so this engine still runs with only `server/vendor` on the
+# path (which is what CI's import smoke test proves).
+try:
+    from mo_evolve.metric import TieredMetric as _TieredMetric, dimensions_of as _dimensions_of
+except ImportError:  # pragma: no cover - exercised by the standalone CI job
+    _TieredMetric = None
+    _dimensions_of = None
+try:
+    from mo_evolve import gate as _gate
+except ImportError:  # pragma: no cover
+    _gate = None
+try:
+    from mo_evolve import safety as _safety
+except ImportError:  # pragma: no cover
+    _safety = None
+
 console = Console()
 
 
@@ -155,10 +172,43 @@ def evolve(
 
     start_time = time.time()
 
-    # GEPA (dspy >= 3.2) needs a feedback-style metric and a reflection LM, and
-    # takes its budget via auto/max_metric_calls (not max_steps). Wrap the float
-    # metric so it also returns textual feedback for GEPA's reflective mutation.
+    # Budget scales with the user-chosen iteration count: each "iteration" is
+    # ~15 metric calls. Keeps small runs fast/cheap and large runs thorough.
+    budget = max(15, iterations * 15)
+
+    # Mo local patch: tiered metric. Upstream scores everything with the
+    # keyword-overlap heuristic and hands GEPA a formatted float as "feedback",
+    # which defeats the point of GEPA's reflective mutation. TieredMetric runs
+    # the free heuristic first and escalates to the (already-written but never
+    # instantiated) LLMJudge when a candidate scores poorly — which is exactly
+    # where the reflector reads feedback. Guarded import so the vendored engine
+    # still runs standalone, without mo_evolve on the path.
+    # Evolver-profile paths. Every run gets a fresh cwd, so anything meant to
+    # persist across runs has to live here rather than under output/.
+    _evolve_home = Path(hermes_repo or config.hermes_agent_path) / "profiles" / "ye-mao-evolve" / "evolve"
+
+    metric = None
+    if _TieredMetric is not None:
+        try:
+            metric = _TieredMetric(
+                config,
+                # Stable across runs: the nightly loop re-scores the same pin
+                # set on every run, and those judgements are identical whenever
+                # the skill text and output repeat.
+                cache_path=_evolve_home / "judge_cache" / f"{skill_name}.json",
+                max_metric_calls=budget,
+            )
+            console.print(f"  Metric: tiered (judge escalates below "
+                          f"{config.judge_escalate_below:.2f}, model {eval_model})")
+        except Exception as exc:
+            console.print(f"[yellow]Tiered metric unavailable ({exc}); using heuristic[/yellow]")
+            metric = None
+    if metric is None:
+        console.print("[yellow]  Metric: keyword-overlap heuristic (no LLM judge)[/yellow]")
+
     def _gepa_metric(gold, pred, trace=None, pred_name=None, pred_trace=None):
+        if metric is not None:
+            return metric(gold, pred, trace, pred_name, pred_trace)
         score = skill_fitness_metric(gold, pred, trace)
         out = (getattr(pred, "output", "") or "").strip()
         if not out:
@@ -169,10 +219,6 @@ def evolve(
         else:
             fb = f"score={score:.2f}. Good — matched the expected behavior."
         return dspy.Prediction(score=score, feedback=fb)
-
-    # Budget scales with the user-chosen iteration count: each "iteration" is
-    # ~15 metric calls. Keeps small runs fast/cheap and large runs thorough.
-    budget = max(15, iterations * 15)
     try:
         optimizer = dspy.GEPA(
             metric=_gepa_metric,
@@ -211,6 +257,19 @@ def evolve(
     # ── 7. Validate evolved skill ───────────────────────────────────────
     console.print(f"\n[bold]Validating evolved skill[/bold]")
     evolved_constraints = validator.validate_all(evolved_full, "skill", baseline_text=skill["raw"])
+
+    # Mo local patch: content safety. The size/growth/structure checks say
+    # nothing about what the text *is* — and this text ends up in a file the
+    # agent loads. Scanned diff-scoped (only lines this rewrite introduced) so
+    # a skill that legitimately discusses shell commands stays evolvable.
+    safety_findings = []
+    if _safety is not None:
+        try:
+            extra, safety_findings = _safety.constraint_results(evolved_full, skill["raw"])
+            evolved_constraints = list(evolved_constraints) + list(extra)
+        except Exception as exc:
+            console.print(f"[yellow]Safety scan unavailable ({exc})[/yellow]")
+
     all_pass = True
     for c in evolved_constraints:
         icon = "✓" if c.passed else "✗"
@@ -225,6 +284,17 @@ def evolve(
         output_path = Path("output") / skill_name / "evolved_FAILED.md"
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(evolved_full)
+        # Mo local patch: persist the constraint verdicts on this path too.
+        # A run rejected *for* a high-severity injection finding is exactly the
+        # run whose findings someone needs to read; without this they were
+        # printed to the log and then dropped, because this return precedes the
+        # safety.json write below.
+        (output_path.parent / "failed_constraints.json").write_text(json.dumps({
+            "constraints": [{"name": c.constraint_name, "passed": c.passed,
+                             "message": c.message, "details": c.details}
+                            for c in evolved_constraints],
+            "safety_findings": [f.to_dict() for f in safety_findings],
+        }, ensure_ascii=False, indent=2))
         console.print(f"  Saved failed variant to {output_path}")
         return
 
@@ -233,22 +303,80 @@ def evolve(
 
     holdout_examples = dataset.to_dspy_examples("holdout")
 
+    # Mo local patch: the holdout is always scored by the LLM judge (never the
+    # keyword proxy) because this is the number the acceptance gate rests on.
+    # Per-example scores are retained — the gate runs a *paired* bootstrap over
+    # the per-example deltas, which upstream's mean-only loop threw away.
     baseline_scores = []
     evolved_scores = []
+    baseline_fs = []
+    evolved_fs = []
     for ex in holdout_examples:
-        # Score baseline
         with dspy.context(lm=lm):
             baseline_pred = baseline_module(task_input=ex.task_input)
-            baseline_score = skill_fitness_metric(ex, baseline_pred)
-            baseline_scores.append(baseline_score)
-
             evolved_pred = optimized_module(task_input=ex.task_input)
-            evolved_score = skill_fitness_metric(ex, evolved_pred)
-            evolved_scores.append(evolved_score)
+
+        if metric is not None:
+            b_fs = metric.score_pair(ex, baseline_pred)
+            e_fs = metric.score_pair(ex, evolved_pred)
+            baseline_fs.append(b_fs)
+            evolved_fs.append(e_fs)
+            baseline_scores.append(b_fs.composite)
+            evolved_scores.append(e_fs.composite)
+        else:
+            baseline_scores.append(skill_fitness_metric(ex, baseline_pred))
+            evolved_scores.append(skill_fitness_metric(ex, evolved_pred))
+
+    if metric is not None:
+        metric.flush_cache()
 
     avg_baseline = sum(baseline_scores) / max(1, len(baseline_scores))
     avg_evolved = sum(evolved_scores) / max(1, len(evolved_scores))
     improvement = avg_evolved - avg_baseline
+
+    # ── 8b. Regression pin set + acceptance gate ────────────────────────
+    # Pins are holdout examples donated by every previously ACCEPTED run of
+    # this skill. A candidate that improves today's rubric while breaking an
+    # older one is rejected — "benchmarks are gates, not fitness functions",
+    # implemented without any external benchmark.
+    pin_result = None
+    pins_dir = _evolve_home / "pins"
+    if _gate is not None:
+        pins = _gate.read_pins(pins_dir, skill_name)
+        if pins:
+            console.print(f"\n[bold]Checking {len(pins)} regression pins[/bold]")
+            regressions = []
+            for pin in pins:
+                pex = dspy.Example(
+                    task_input=pin.get("task_input", ""),
+                    expected_behavior=pin.get("expected_behavior", ""),
+                ).with_inputs("task_input")
+                try:
+                    with dspy.context(lm=lm):
+                        b_pred = baseline_module(task_input=pex.task_input)
+                        e_pred = optimized_module(task_input=pex.task_input)
+                    if metric is not None:
+                        b = metric.score_pair(pex, b_pred).composite
+                        e = metric.score_pair(pex, e_pred).composite
+                    else:
+                        b = skill_fitness_metric(pex, b_pred)
+                        e = skill_fitness_metric(pex, e_pred)
+                except Exception:
+                    continue  # a flaky pin must not block an otherwise good run
+                if e < b:
+                    regressions.append({"task_input": pin.get("task_input", "")[:200],
+                                        "baseline": b, "evolved": e, "delta": e - b})
+            pin_result = {"n": len(pins), "regressions": regressions}
+            console.print(f"  {len(regressions)} regressed of {len(pins)}")
+
+    verdict = None
+    if _gate is not None:
+        degraded = bool(metric is not None and metric.stats.degraded)
+        verdict = _gate.evaluate_gate(
+            baseline_scores, evolved_scores, pin_result, config,
+            degraded=degraded,
+            degraded_reason=(metric.stats.degraded_reason if metric is not None else ""),
+        )
 
     # ── 9. Report results ───────────────────────────────────────────────
     table = Table(title="Evolution Results")
@@ -305,13 +433,65 @@ def evolve(
         "elapsed_seconds": elapsed,
         "constraints_passed": all_pass,
     }
+
+    # Mo local patch: record how the scores were actually produced, so the UI
+    # can never again present a keyword-overlap number as an LLM-judge verdict.
+    if metric is not None:
+        fitness = metric.stats.to_dict()
+        fitness.update({
+            "metric_mode": config.metric_mode,
+            "judge_model": config.eval_model,
+            "collusion_risk": config.eval_model == config.optimizer_model,
+            "holdout_pairs": [{"baseline": b, "evolved": e}
+                              for b, e in zip(baseline_scores, evolved_scores)],
+        })
+        if _dimensions_of is not None and baseline_fs:
+            fitness["holdout_dimensions"] = {
+                "baseline": _dimensions_of(baseline_fs),
+                "evolved": _dimensions_of(evolved_fs),
+            }
+        metrics["fitness"] = fitness
+    else:
+        metrics["fitness"] = {"metric_mode": "heuristic", "degraded": False,
+                              "holdout_pairs": [{"baseline": b, "evolved": e}
+                                                for b, e in zip(baseline_scores, evolved_scores)]}
+
+    # The holdout examples this run was judged on. On accept these become the
+    # skill's regression pins. Deliberately NOT named `holdout_examples` — that
+    # key already exists above as an integer count, and runs produced before
+    # this change still carry the int, so reusing the name would hand the
+    # accept path a number to iterate over.
+    metrics["holdout_pin_examples"] = [
+        {"task_input": getattr(ex, "task_input", ""),
+         "expected_behavior": getattr(ex, "expected_behavior", "")}
+        for ex in holdout_examples
+    ]
+
     (output_dir / "metrics.json").write_text(json.dumps(metrics, indent=2))
+
+    if safety_findings:
+        (output_dir / "safety.json").write_text(json.dumps(
+            {"findings": [f.to_dict() for f in safety_findings]},
+            ensure_ascii=False, indent=2))
+
+    if verdict is not None:
+        metrics["gate"] = verdict.to_dict()
+        (output_dir / "metrics.json").write_text(json.dumps(metrics, indent=2))
+        (output_dir / "gate.json").write_text(
+            json.dumps(verdict.to_dict(), ensure_ascii=False, indent=2))
 
     console.print(f"\n  Output saved to {output_dir}/")
 
-    if improvement > 0:
+    # The gate — not `improvement > 0` — decides whether this is deployable.
+    if verdict is not None:
+        if verdict.passed:
+            console.print(f"\n[bold green]✓ 通过采纳门槛：{verdict.reason}[/bold green]")
+            console.print(f"  Review the diff: diff {output_dir}/baseline_skill.md {output_dir}/evolved_skill.md")
+        else:
+            console.print(f"\n[yellow]⚠ 未通过采纳门槛：{verdict.reason}[/yellow]")
+            console.print("  采纳按钮仍可用，但需要二次确认强制采纳。")
+    elif improvement > 0:
         console.print(f"\n[bold green]✓ Evolution improved skill by {improvement:+.3f} ({improvement/max(0.001, avg_baseline)*100:+.1f}%)[/bold green]")
-        console.print(f"  Review the diff: diff {output_dir}/baseline_skill.md {output_dir}/evolved_skill.md")
     else:
         console.print(f"\n[yellow]⚠ Evolution did not improve skill (change: {improvement:+.3f})[/yellow]")
         console.print("  Try: more iterations, better eval dataset, or different optimizer model")
