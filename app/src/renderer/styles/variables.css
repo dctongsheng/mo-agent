@@ -27,6 +27,37 @@ body {
   --moon:         oklch(75% 0.1 85);
   --shadow:       0 1px 2px oklch(40% 0.05 70 / 0.06), 0 8px 24px -10px oklch(40% 0.05 70 / 0.12);
 
+  /* ── Shared UI scales ── */
+  --ink-1:        var(--ink);
+  --font-body:    -apple-system, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+  --font-serif:   'Noto Serif SC', serif;
+  --font-mono:    'JetBrains Mono', monospace;
+  --font-hand:    'Long Cang', cursive;
+
+  --space-1:      4px;
+  --space-2:      8px;
+  --space-3:      12px;
+  --space-4:      16px;
+  --space-5:      24px;
+  --space-6:      32px;
+  --space-7:      40px;
+  --space-8:      48px;
+
+  --radius-sm:    6px;
+  --radius-md:    10px;
+  --radius-lg:    14px;
+  --radius-pill:  999px;
+  --control-sm:   32px;
+  --control-md:   38px;
+  --control-lg:   42px;
+
+  --evolve-page-max: 1120px;
+  --evolve-page-pad: clamp(20px, 4vw, 48px);
+  --evolve-aside: 320px;
+  --evolve-gap: clamp(18px, 2.4vw, 28px);
+  --focus-ring: 0 0 0 3px color-mix(in oklch, var(--indigo) 24%, transparent);
+  --motion-fast: 140ms ease;
+
   background: var(--bg);
   color: var(--ink);
 }

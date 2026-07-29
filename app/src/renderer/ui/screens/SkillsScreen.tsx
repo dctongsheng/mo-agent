@@ -15,7 +15,7 @@ function catColor(category: string): string {
 }
 
 export function SkillsScreen() {
-  const { go } = useAppState();
+  const { goEvolve } = useAppState();
   const moPort = useAppSelector((st) => moPortOf(st.gateway.state));
   const [skills, setSkills] = useState<Skill[]>([]);
   const [loaded, setLoaded] = useState(false);
@@ -114,7 +114,7 @@ export function SkillsScreen() {
       </div>
       <div style={{ marginTop: 18, display: "flex", alignItems: "baseline", gap: 10 }}>
         <span style={{ fontFamily: "'Long Cang', cursive", fontSize: 17, color: "var(--ink-2)" }}>它做过的每件事都会留下轨迹,攒多了就能在梦里学成新方子。</span>
-        <button onClick={() => go("evolve")} style={{ border: "none", background: "transparent", padding: 0, cursor: "pointer", fontSize: 13, color: "var(--indigo)" }}>去看它怎么学的 →</button>
+        <button onClick={() => goEvolve("skills")} style={{ border: "none", background: "transparent", padding: 0, cursor: "pointer", fontSize: 13, color: "var(--indigo)" }}>去看它怎么学的 →</button>
       </div>
     </div>
   );

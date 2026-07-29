@@ -393,7 +393,7 @@ export function DeskScreen({ mainRef }: { mainRef: React.RefObject<HTMLDivElemen
                 )}
                 {m.specimenNo != null && (
                   <button
-                    onClick={() => s.go("evolve")}
+                    onClick={() => s.goEvolve("overview")}
                     style={{ display: "block", marginTop: 10, border: "none", background: "transparent", padding: 0, cursor: "pointer", fontSize: 12, color: "var(--indigo)" }}
                   >✦ 本次会话已收入训练数据 · 第 {m.specimenNo} 条轨迹{m.specimenTurns && m.specimenTurns > 1 ? ` · ${m.specimenTurns} 轮` : ""} →</button>
                 )}

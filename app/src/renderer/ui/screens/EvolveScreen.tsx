@@ -1,213 +1,643 @@
-import React, { useEffect, useState, useCallback } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useAppSelector } from "../../store/hooks";
 import { moPortOf } from "../../store/slices/gatewaySlice";
-import { useAppState } from "../appState";
+import {
+  getEvolutionStats,
+  getEvolveSchedule,
+  getEvolveStatus,
+  labelTrajectory,
+  listEvolveRuns,
+  listPending,
+  listTrajectories,
+  scheduleMolting,
+  type EvolutionStats,
+  type EvolveRun,
+  type EvolveSchedule,
+  type EvolveStatus,
+  type PendingList,
+  type Trajectory,
+} from "../../services/mo-api";
+import { useAppState, type EvolveSection } from "../appState";
+import { EmptyState, MetricCard, PageHeader, Panel, SectionTabs, StatusBadge } from "../components/EvolveUi";
 import { GrowthRings } from "../components/GrowthRings";
 import { TapeCard } from "../components/TapeCard";
+import { HarnessCurate } from "./HarnessCurate";
+import { HarnessEvolve } from "./HarnessEvolve";
 import { HarnessInbox } from "./HarnessInbox";
 import { HarnessLearn } from "./HarnessLearn";
-import { HarnessEvolve } from "./HarnessEvolve";
-import { HarnessCurate } from "./HarnessCurate";
 import { HarnessLedger } from "./HarnessLedger";
-import {
-  getEvolutionStats, listTrajectories, labelTrajectory, scheduleMolting,
-  EvolutionStats, Trajectory,
-} from "../../services/mo-api";
 
 const NUMS = ["零", "一", "二", "三", "四", "五", "六", "七", "八", "九", "十", "十一", "十二"];
 const numCn = (n: number) => (n <= 12 ? NUMS[n] : String(n));
 
-function fmtTime(ts: number): string {
+const SECTION_ORDER: EvolveSection[] = ["overview", "reviews", "learn", "skills", "curation", "ledger"];
+
+type OverviewSnapshot = {
+  loading: boolean;
+  loaded: boolean;
+  errors: string[];
+  stats: EvolutionStats | null;
+  trajectories: Trajectory[];
+  pending: PendingList | null;
+  evolveStatus: EvolveStatus | null;
+  runs: EvolveRun[];
+  schedule: EvolveSchedule | null;
+};
+
+type ActionTone = "neutral" | "success" | "warning" | "danger" | "info";
+
+type ActionItem = {
+  key: string;
+  tone: ActionTone;
+  title: string;
+  detail: string;
+  section?: EvolveSection;
+  action?: string;
+};
+
+const EMPTY_OVERVIEW: OverviewSnapshot = {
+  loading: true,
+  loaded: false,
+  errors: [],
+  stats: null,
+  trajectories: [],
+  pending: null,
+  evolveStatus: null,
+  runs: [],
+  schedule: null,
+};
+
+function fmtTime(ts?: number): string {
+  if (!ts) return "—";
   const d = new Date(ts * 1000);
   return `${d.getMonth() + 1}/${String(d.getDate()).padStart(2, "0")} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
 }
 
-export function EvolveScreen() {
-  const moPort = useAppSelector((s) => moPortOf(s.gateway.state));
-  const { go } = useAppState();
-  const [stats, setStats] = useState<EvolutionStats | null>(null);
-  const [trajs, setTrajs] = useState<Trajectory[]>([]);
-  const [trajOpen, setTrajOpen] = useState(false);
-  const [scheduled, setScheduled] = useState(false);
+function runLabel(status: EvolveRun["status"]): string {
+  return {
+    running: "运行中",
+    done: "待审",
+    failed: "失败",
+    accepted: "已采纳",
+    rejected: "已弃用",
+  }[status];
+}
 
-  const refresh = useCallback(() => {
-    if (!moPort) return;
-    getEvolutionStats(moPort).then(setStats).catch(() => {});
-    listTrajectories(moPort, 20).then((r) => setTrajs(r.data)).catch(() => {});
+function runTone(status: EvolveRun["status"]): ActionTone {
+  if (status === "accepted") return "success";
+  if (status === "failed") return "danger";
+  if (status === "running" || status === "done") return "warning";
+  return "neutral";
+}
+
+export function EvolveScreen({ mainRef }: { mainRef: React.RefObject<HTMLDivElement | null> }) {
+  const moPort = useAppSelector((s) => moPortOf(s.gateway.state));
+  const { evolveSection, setEvolveSection, goEvolve, go } = useAppState();
+  const [visited, setVisited] = useState<Set<EvolveSection>>(
+    () => new Set<EvolveSection>(["overview", evolveSection]),
+  );
+  const [overview, setOverview] = useState<OverviewSnapshot>(EMPTY_OVERVIEW);
+  const [trajOpen, setTrajOpen] = useState(false);
+  const [recorded, setRecorded] = useState(false);
+  const [recording, setRecording] = useState(false);
+  const [recordError, setRecordError] = useState<string | null>(null);
+  const refreshSeq = useRef(0);
+
+  const refreshOverview = useCallback(async () => {
+    const seq = ++refreshSeq.current;
+    if (!moPort) {
+      setOverview({
+        ...EMPTY_OVERVIEW,
+        loading: false,
+        loaded: true,
+        errors: ["本机进化服务尚未连接"],
+      });
+      return;
+    }
+
+    setOverview((current) => ({ ...current, loading: true, errors: [] }));
+    const [statsResult, trajResult, pendingResult, statusResult, runsResult, scheduleResult] =
+      await Promise.allSettled([
+        getEvolutionStats(moPort),
+        listTrajectories(moPort, 20),
+        listPending(moPort),
+        getEvolveStatus(moPort),
+        listEvolveRuns(moPort),
+        getEvolveSchedule(moPort),
+      ]);
+
+    if (seq !== refreshSeq.current) return;
+
+    const errors: string[] = [];
+    if (statsResult.status === "rejected") errors.push("成长统计");
+    if (trajResult.status === "rejected") errors.push("训练标本");
+    if (pendingResult.status === "rejected") errors.push("待确认事项");
+    if (statusResult.status === "rejected") errors.push("进化引擎");
+    if (runsResult.status === "rejected") errors.push("进化记录");
+    if (scheduleResult.status === "rejected") errors.push("夜间计划");
+
+    setOverview({
+      loading: false,
+      loaded: true,
+      errors,
+      stats: statsResult.status === "fulfilled" ? statsResult.value : null,
+      trajectories: trajResult.status === "fulfilled" ? trajResult.value.data : [],
+      pending: pendingResult.status === "fulfilled" ? pendingResult.value : null,
+      evolveStatus: statusResult.status === "fulfilled" ? statusResult.value : null,
+      runs: runsResult.status === "fulfilled" ? runsResult.value.data : [],
+      schedule: scheduleResult.status === "fulfilled" ? scheduleResult.value : null,
+    });
   }, [moPort]);
 
-  useEffect(() => { refresh(); }, [refresh]);
+  useEffect(() => {
+    setVisited((current) => {
+      if (current.has(evolveSection)) return current;
+      const next = new Set(current);
+      next.add(evolveSection);
+      return next;
+    });
+    mainRef.current?.scrollTo({ top: 0, behavior: "auto" });
+  }, [evolveSection, mainRef]);
 
-  const label = (id: string, l: "pos" | "neg") => {
+  // The page header and tab badges are global to every workbench. Refresh on
+  // each section activation so direct links (for example Skills → GEPA) never
+  // render an empty overview snapshot, and actions completed in a child
+  // workbench are reflected when the user moves on.
+  useEffect(() => {
+    void refreshOverview();
+  }, [evolveSection, refreshOverview]);
+
+  // Only the visible overview polls, and only while a run is actually moving.
+  // Once the run settles this effect tears itself down on the next refresh.
+  useEffect(() => {
+    if (evolveSection !== "overview" || !moPort) return;
+    if (!overview.runs.some((run) => run.status === "running")) return;
+    const timer = window.setInterval(() => void refreshOverview(), 4000);
+    return () => window.clearInterval(timer);
+  }, [evolveSection, moPort, overview.runs, refreshOverview]);
+
+  const pendingCount = overview.pending?.data.length ?? 0;
+  const runningCount = overview.runs.filter((run) => run.status === "running").length;
+  const reviewableCount = overview.runs.filter((run) => run.status === "done").length;
+  const acceptedCount = overview.runs.filter((run) => run.status === "accepted").length;
+  const failedCount = overview.runs.filter((run) => run.status === "failed").length;
+  const pendingRestartCount = overview.evolveStatus?.pending?.length ?? 0;
+  const ringCount = overview.stats?.molting_count ?? 0;
+
+  const tabs = useMemo(() => [
+    { id: "overview", label: "概览" },
+    { id: "reviews", label: "待我确认", badge: pendingCount || undefined },
+    { id: "learn", label: "教它一手" },
+    { id: "skills", label: "技艺进化", badge: (runningCount + reviewableCount) || undefined },
+    { id: "curation", label: "技艺清点" },
+    { id: "ledger", label: "成效台账" },
+  ], [pendingCount, reviewableCount, runningCount]);
+
+  const actions = useMemo<ActionItem[]>(() => {
+    const next: ActionItem[] = [];
+
+    if (!moPort) {
+      next.push({
+        key: "offline",
+        tone: "danger",
+        title: "进化服务尚未连接",
+        detail: "桌面后端仍在启动，或本机服务连接失败。",
+      });
+    } else {
+      if (overview.evolveStatus && !overview.evolveStatus.ready) {
+        next.push({
+          key: "engine",
+          tone: "danger",
+          title: "技艺进化引擎未就绪",
+          detail: overview.evolveStatus.reason || "请检查模型配置与引擎日志。",
+          section: "skills",
+          action: "查看配置",
+        });
+      }
+      if (overview.errors.length > 0) {
+        next.push({
+          key: "partial",
+          tone: "warning",
+          title: "部分本机台账暂时读不到",
+          detail: `未能读取：${overview.errors.join("、")}。已有数据仍可继续查看。`,
+        });
+      }
+    }
+
+    if (pendingCount > 0) {
+      next.push({
+        key: "pending",
+        tone: "warning",
+        title: `${pendingCount} 项改动等你确认`,
+        detail: "包括后台复盘、学习草稿或技艺清点产生的提案。",
+        section: "reviews",
+        action: "去确认",
+      });
+    }
+
+    if (reviewableCount > 0) {
+      next.push({
+        key: "reviewable",
+        tone: "warning",
+        title: `${reviewableCount} 次技艺进化已经完成`,
+        detail: "候选仍在暂存区，需要查看 Diff 后决定是否采纳。",
+        section: "skills",
+        action: "查看候选",
+      });
+    }
+
+    if (failedCount > 0) {
+      next.push({
+        key: "failed",
+        tone: "danger",
+        title: `${failedCount} 次进化没有通过`,
+        detail: "失败记录不会自动写回；可查看日志、约束和评审意见。",
+        section: "skills",
+        action: "查看记录",
+      });
+    }
+
+    if (pendingRestartCount > 0) {
+      next.push({
+        key: "restart",
+        tone: "info",
+        title: `${pendingRestartCount} 项已采纳改动等待重启`,
+        detail: "为保留提示词缓存，技艺改动会在下次引擎启动时生效。",
+        section: "skills",
+        action: "查看进化",
+      });
+    }
+
+    if (next.length === 0 && overview.loaded && !overview.loading) {
+      next.push({
+        key: "clear",
+        tone: "success",
+        title: "现在没有需要处理的事项",
+        detail: overview.schedule?.enabled
+          ? `夜间技艺进化已安排在 ${String(overview.schedule.hour).padStart(2, "0")}:${String(overview.schedule.minute).padStart(2, "0")}。`
+          : "可以继续积累真实轨迹，或主动教它一项新技艺。",
+        section: overview.schedule?.enabled ? "skills" : "learn",
+        action: overview.schedule?.enabled ? "查看计划" : "教它一手",
+      });
+    }
+
+    return next;
+  }, [
+    failedCount,
+    moPort,
+    overview.errors,
+    overview.evolveStatus,
+    overview.loaded,
+    overview.loading,
+    overview.schedule,
+    pendingCount,
+    pendingRestartCount,
+    reviewableCount,
+  ]);
+
+  const label = (id: string, nextLabel: "pos" | "neg") => {
     if (!moPort) return;
-    setTrajs((ts) => ts.map((t) => (t.id === id ? { ...t, label: l } : t)));
-    labelTrajectory(moPort, id, l).then(() => {
-      getEvolutionStats(moPort).then(setStats).catch(() => {});
-    }).catch(() => refresh());
+    setOverview((current) => ({
+      ...current,
+      trajectories: current.trajectories.map((trajectory) =>
+        trajectory.id === id ? { ...trajectory, label: nextLabel } : trajectory),
+    }));
+    labelTrajectory(moPort, id, nextLabel)
+      .then(() => refreshOverview())
+      .catch(() => refreshOverview());
   };
 
-  const schedule = () => {
-    if (!moPort || scheduled) return;
-    scheduleMolting(moPort, `手动安排 · ${trajs.length} 条轨迹待入药`).then(() => {
-      setScheduled(true);
-      refresh();
-    }).catch(() => {});
+  const recordGrowth = () => {
+    if (!moPort || recording || recorded) return;
+    setRecordError(null);
+    setRecording(true);
+    scheduleMolting(moPort, `手动记录成长节点 · ${overview.trajectories.length} 条近期轨迹`)
+      .then(() => {
+        setRecorded(true);
+        return refreshOverview();
+      })
+      .catch(() => {
+        setRecordError("成长节点没有写入本机台账，请检查连接后重试。");
+      })
+      .finally(() => setRecording(false));
   };
 
-  const ringCount = stats?.molting_count ?? 0;
-  const empty = stats != null && stats.task_count === 0;
+  const selectSection = (section: string) => {
+    if (SECTION_ORDER.includes(section as EvolveSection)) {
+      setEvolveSection(section as EvolveSection);
+    }
+  };
+
+  const engineAside = overview.evolveStatus ? (
+    <StatusBadge tone={overview.evolveStatus.ready ? "success" : "warning"}>
+      {overview.evolveStatus.ready ? "进化引擎已就绪" : "进化引擎未就绪"}
+    </StatusBadge>
+  ) : undefined;
 
   return (
-    <div style={{ maxWidth: 1080, margin: "0 auto", padding: "44px 48px 90px" }}>
-      <div style={{ fontSize: 11, letterSpacing: "0.22em", color: "var(--seal)", fontFamily: "'JetBrains Mono', monospace" }}>SELF-EVOLUTION · 自进化中心</div>
-      <h1 style={{ margin: "12px 0 8px", fontFamily: "'Noto Serif SC', serif", fontSize: 28, fontWeight: 650, letterSpacing: "-0.01em" }}>
-        {ringCount > 0 ? `第${numCn(ringCount)}环。它正在长成更懂你的样子。` : "还没添过环。一切从第一条轨迹开始。"}
-      </h1>
-      <p style={{ margin: 0, fontSize: 14.5, lineHeight: 1.7, color: "var(--ink-2)", maxWidth: 620 }}>
-        每一项任务都被观察、制成标本;攒够了,就在梦里完成一次「蜕皮」。这页的数字全部来自本机真实记录。
-      </p>
+    <main className="evolve-page">
+      <PageHeader
+        eyebrow="SELF-EVOLUTION · 自进化中心"
+        title={ringCount > 0 ? `第${numCn(ringCount)}环。先看今天需要你做什么。` : "一切从第一条真实轨迹开始。"}
+        description="改动先经过你，技艺与模型分开进化；每一次采纳、回退和花费，都留在本机台账里。"
+        aside={engineAside}
+      />
 
-      <div style={{ display: "grid", gridTemplateColumns: "340px 1fr", gap: 32, marginTop: 40, alignItems: "start" }}>
-        {/* Growth rings */}
-        <TapeCard tapeLeft={true} tapeRotate="-2.5deg" style={{ padding: "26px 24px 20px", display: "flex", flexDirection: "column", alignItems: "center", gap: 8 }}>
-          <GrowthRings count={Math.max(ringCount, 1)} />
-          <div style={{ fontSize: 12, color: "var(--ink-3)", textAlign: "center", lineHeight: 1.6 }}>
-            生长环 · GROWTH RINGS<br />已蜕皮 {ringCount} 次
-          </div>
-        </TapeCard>
-
-        {/* Stats summary */}
-        <div>
-          <div style={{ fontSize: 10, letterSpacing: "0.18em", color: "var(--ink-3)", fontFamily: "'JetBrains Mono', monospace", marginBottom: 14 }}>生长台账 · LEDGER</div>
-          {empty ? (
-            <div style={{ padding: "28px 0", borderTop: "1px solid var(--line)", borderBottom: "1px solid var(--line)" }}>
-              <div style={{ fontFamily: "'Long Cang', cursive", fontSize: 19, color: "var(--ink-2)" }}>台账还空着。</div>
-              <div style={{ fontSize: 13, color: "var(--ink-3)", marginTop: 6 }}>去工作台聊几句——每次对话都会留下一条轨迹标本。</div>
-              <button onClick={() => go("home")} style={{ marginTop: 12, border: "none", background: "transparent", padding: 0, cursor: "pointer", fontSize: 13, color: "var(--indigo)" }}>去工作台 →</button>
-            </div>
-          ) : (
-            <div>
-              <LedgerRow k="轨迹标本" v={`${stats?.task_count ?? "…"} 条`} />
-              <LedgerRow k="记忆标本" v={`${stats?.specimen_count ?? "…"} 条`} />
-              <LedgerRow k="已标注 正例 / 负例" v={`${stats?.labeled_pos ?? 0} / ${stats?.labeled_neg ?? 0}`} />
-              <LedgerRow k="标注成功率" v={stats?.success_rate != null ? `${Math.round(stats.success_rate * 100)}%` : "未标注"} />
-              <LedgerRow k="上次蜕皮" v={stats?.last_molting ? fmtTime(stats.last_molting.at) : "还没有过"} last />
-            </div>
-          )}
-        </div>
+      <div className="evolve-tabs-wrap">
+        <SectionTabs
+          ariaLabel="自进化工作台"
+          tabs={tabs}
+          active={evolveSection}
+          onChange={selectSection}
+        />
       </div>
 
-      {/* 2-card grid */}
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 26, marginTop: 40 }}>
+      <section
+        id="evolve-panel-overview"
+        role="tabpanel"
+        aria-labelledby="evolve-tab-overview"
+        hidden={evolveSection !== "overview"}
+        className="evolve-section"
+      >
+        {overview.loading && !overview.loaded ? (
+          <Panel>
+            <EmptyState title="正在清点本机成长记录…" description="统计、待确认事项和进化记录会分别读取。" />
+          </Panel>
+        ) : (
+          <Overview
+            overview={overview}
+            actions={actions}
+            ringCount={ringCount}
+            pendingCount={pendingCount}
+            runningCount={runningCount}
+            acceptedCount={acceptedCount}
+            trajOpen={trajOpen}
+            recorded={recorded}
+            recording={recording}
+            recordError={recordError}
+            onToggleTrajectories={() => setTrajOpen((open) => !open)}
+            onLabel={label}
+            onRecordGrowth={recordGrowth}
+            onRefresh={refreshOverview}
+            onGoSection={goEvolve}
+            onGoDream={() => go("dream")}
+          />
+        )}
+      </section>
 
-        {/* Herbarium — real trajectories */}
-        <TapeCard tapeLeft={true} tapeRotate="2.5deg" style={{ padding: "22px 24px" }}>
-          <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", marginBottom: 4 }}>
-            <span style={{ fontFamily: "'Noto Serif SC', serif", fontSize: 17, fontWeight: 650 }}>训练数据 · 标本馆</span>
-            <span style={{ fontSize: 9.5, letterSpacing: "0.16em", color: "var(--ink-3)", fontFamily: "'JetBrains Mono', monospace" }}>HERBARIUM</span>
+      {(visited.has("reviews") || evolveSection === "reviews") && (
+        <section
+          id="evolve-panel-reviews"
+          role="tabpanel"
+          aria-labelledby="evolve-tab-reviews"
+          hidden={evolveSection !== "reviews"}
+          className="evolve-section"
+        >
+          <HarnessInbox active={evolveSection === "reviews"} />
+        </section>
+      )}
+
+      {(visited.has("learn") || evolveSection === "learn") && (
+        <section
+          id="evolve-panel-learn"
+          role="tabpanel"
+          aria-labelledby="evolve-tab-learn"
+          hidden={evolveSection !== "learn"}
+          className="evolve-section"
+        >
+          <HarnessLearn active={evolveSection === "learn"} />
+        </section>
+      )}
+
+      {(visited.has("skills") || evolveSection === "skills") && (
+        <section
+          id="evolve-panel-skills"
+          role="tabpanel"
+          aria-labelledby="evolve-tab-skills"
+          hidden={evolveSection !== "skills"}
+          className="evolve-section"
+        >
+          <HarnessEvolve active={evolveSection === "skills"} />
+        </section>
+      )}
+
+      {(visited.has("curation") || evolveSection === "curation") && (
+        <section
+          id="evolve-panel-curation"
+          role="tabpanel"
+          aria-labelledby="evolve-tab-curation"
+          hidden={evolveSection !== "curation"}
+          className="evolve-section"
+        >
+          <HarnessCurate active={evolveSection === "curation"} />
+        </section>
+      )}
+
+      {(visited.has("ledger") || evolveSection === "ledger") && (
+        <section
+          id="evolve-panel-ledger"
+          role="tabpanel"
+          aria-labelledby="evolve-tab-ledger"
+          hidden={evolveSection !== "ledger"}
+          className="evolve-section"
+        >
+          <HarnessLedger active={evolveSection === "ledger"} />
+        </section>
+      )}
+    </main>
+  );
+}
+
+type OverviewProps = {
+  overview: OverviewSnapshot;
+  actions: ActionItem[];
+  ringCount: number;
+  pendingCount: number;
+  runningCount: number;
+  acceptedCount: number;
+  trajOpen: boolean;
+  recorded: boolean;
+  recording: boolean;
+  recordError: string | null;
+  onToggleTrajectories: () => void;
+  onLabel: (id: string, label: "pos" | "neg") => void;
+  onRecordGrowth: () => void;
+  onRefresh: () => void;
+  onGoSection: (section: EvolveSection) => void;
+  onGoDream: () => void;
+};
+
+function Overview({
+  overview,
+  actions,
+  ringCount,
+  pendingCount,
+  runningCount,
+  acceptedCount,
+  trajOpen,
+  recorded,
+  recording,
+  recordError,
+  onToggleTrajectories,
+  onLabel,
+  onRecordGrowth,
+  onRefresh,
+  onGoSection,
+  onGoDream,
+}: OverviewProps) {
+  const recentRuns = overview.runs.slice(0, 5);
+
+  return (
+    <div className="evolve-overview">
+      <div className="evolve-metrics" aria-label="自进化关键指标">
+        <MetricCard label="待我确认" value={pendingCount} hint="后台提案与学习草稿" tone={pendingCount > 0 ? "warning" : "neutral"} />
+        <MetricCard label="运行中" value={runningCount} hint="技艺 GEPA 任务" tone={runningCount > 0 ? "info" : "neutral"} />
+        <MetricCard label="已采纳" value={acceptedCount} hint="保留在进化记录中" tone={acceptedCount > 0 ? "success" : "neutral"} />
+        <MetricCard label="轨迹标本" value={overview.stats?.task_count ?? "—"} hint="本机真实对话记录" tone="neutral" />
+      </div>
+
+      <div className="evolve-overview-grid">
+        <div className="evolve-overview-main">
+          <Panel title="现在需要你" eyebrow="ACTION INBOX">
+            <div className="evolve-action-list">
+              {actions.map((item) => (
+                <div key={item.key} className={`evolve-action-item evolve-action-item--${item.tone}`}>
+                  <span className="evolve-action-dot" aria-hidden="true" />
+                  <div className="evolve-action-copy">
+                    <div className="evolve-action-title">{item.title}</div>
+                    <div className="evolve-action-detail">{item.detail}</div>
+                  </div>
+                  {item.section && item.action && (
+                    <button type="button" className="evolve-link-button" onClick={() => onGoSection(item.section!)}>
+                      {item.action} →
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+            {overview.errors.length > 0 && (
+              <button type="button" className="evolve-secondary-button" onClick={onRefresh}>
+                重新读取缺失台账
+              </button>
+            )}
+          </Panel>
+
+          <Panel title="最近的技艺进化" eyebrow="RECENT RUNS">
+            {recentRuns.length === 0 ? (
+              <EmptyState
+                title="还没有技艺进化记录"
+                description="先积累真实轨迹，再挑一项技艺让夜貘打磨。"
+                action={<button type="button" className="evolve-link-button" onClick={() => onGoSection("skills")}>去技艺进化 →</button>}
+              />
+            ) : (
+              <div className="evolve-run-list">
+                {recentRuns.map((run) => (
+                  <button key={run.id} type="button" className="evolve-run-row" onClick={() => onGoSection("skills")}>
+                    <span className="evolve-run-skill">{run.skill}</span>
+                    <StatusBadge tone={runTone(run.status)}>{runLabel(run.status)}</StatusBadge>
+                    <span className="evolve-run-time">{fmtTime(run.created_at)}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </Panel>
+        </div>
+
+        <TapeCard tapeLeft={true} tapeRotate="-2.5deg" style={{ padding: "24px 22px 20px" }}>
+          <div className="evolve-growth-card">
+            <GrowthRings count={Math.max(ringCount, 1)} />
+            <div className="evolve-growth-kicker">GROWTH RINGS · 生长环</div>
+            <div className="evolve-growth-count">已经留下 {ringCount} 个成长节点</div>
+            <p>生长环只记录被你确认过的成长，不把一次运行伪装成真正进步。</p>
           </div>
-          <div style={{ fontFamily: "'Long Cang', cursive", fontSize: 16, color: "var(--ink-2)", marginBottom: 14 }}>
-            {stats ? `已制成 ${stats.task_count} 条轨迹标本。` : "清点中……"}
+        </TapeCard>
+      </div>
+
+      <div className="evolve-panel-grid">
+        <Panel
+          title="训练标本"
+          eyebrow="TRAJECTORIES"
+          actions={(
+            <button type="button" className="evolve-secondary-button" onClick={onToggleTrajectories}>
+              {trajOpen ? "收起" : "查看最近 20 条"}
+            </button>
+          )}
+        >
+          <div className="evolve-ledger-summary">
+            <span>正例 <b>{overview.stats?.labeled_pos ?? 0}</b></span>
+            <span>负例 <b>{overview.stats?.labeled_neg ?? 0}</b></span>
+            <span>标注成功率 <b>{overview.stats?.success_rate == null ? "—" : `${Math.round(overview.stats.success_rate * 100)}%`}</b></span>
           </div>
-          <div style={{ fontSize: 11.5, color: "var(--ink-3)", borderTop: "1px dashed var(--line)", paddingTop: 10 }}>
-            标本只存在本机 ~/.hermes-mo/trajectories,点 正/负 印章即可标注。
-          </div>
-          <button onClick={() => setTrajOpen((o) => !o)} style={linkBtn}>{trajOpen ? "收起标本 ▴" : "翻看标本 ▾"}</button>
+          <p className="evolve-panel-note">标本仅保存在本机。正负标注会进入后续真实轨迹评测。</p>
           {trajOpen && (
-            <div style={dataPanel}>
-              {trajs.length === 0 && <span style={{ color: "var(--ink-3)" }}>还没有标本。</span>}
-              {trajs.map((t) => (
-                <div key={t.id} style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                  <span style={{ flex: 1, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                    {t.prompt.slice(0, 24)}{t.prompt.length > 24 ? "…" : ""}
-                  </span>
-                  <span style={{ color: "var(--ink-3)", flexShrink: 0 }}>{fmtTime(t.created_at)}</span>
-                  <button
-                    onClick={() => label(t.id, "pos")}
-                    style={{ ...stampBtn, color: "var(--moss)", borderColor: "var(--moss)", opacity: t.label === "pos" ? 1 : 0.4 }}
-                  >正</button>
-                  <button
-                    onClick={() => label(t.id, "neg")}
-                    style={{ ...stampBtn, color: "var(--seal)", borderColor: "var(--seal)", opacity: t.label === "neg" ? 1 : 0.4 }}
-                  >负</button>
+            <div className="evolve-trajectory-list">
+              {overview.trajectories.length === 0 ? (
+                <EmptyState title="还没有训练标本" description="去工作台完成一次对话后，这里会出现真实轨迹。" />
+              ) : overview.trajectories.map((trajectory) => (
+                <div key={trajectory.id} className="evolve-trajectory-row">
+                  <div className="evolve-trajectory-copy">
+                    <span className="evolve-trajectory-prompt">{trajectory.prompt}</span>
+                    <span className="evolve-trajectory-time">{fmtTime(trajectory.created_at)}</span>
+                  </div>
+                  <div className="evolve-inline-actions">
+                    <button
+                      type="button"
+                      aria-pressed={trajectory.label === "pos"}
+                      className={`evolve-stamp-button evolve-stamp-button--positive${trajectory.label === "pos" ? " is-active" : ""}`}
+                      onClick={() => onLabel(trajectory.id, "pos")}
+                    >
+                      正
+                    </button>
+                    <button
+                      type="button"
+                      aria-pressed={trajectory.label === "neg"}
+                      className={`evolve-stamp-button evolve-stamp-button--negative${trajectory.label === "neg" ? " is-active" : ""}`}
+                      onClick={() => onLabel(trajectory.id, "neg")}
+                    >
+                      负
+                    </button>
+                  </div>
                 </div>
               ))}
             </div>
           )}
-        </TapeCard>
+        </Panel>
 
-        {/* Molting */}
-        <TapeCard tapeLeft={false} tapeRotate="-2deg" style={{ padding: "22px 24px" }}>
-          <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", marginBottom: 4 }}>
-            <span style={{ fontFamily: "'Noto Serif SC', serif", fontSize: 17, fontWeight: 650 }}>蜕皮 · 模型与骨架</span>
-            <span style={{ fontSize: 9.5, letterSpacing: "0.16em", color: "var(--ink-3)", fontFamily: "'JetBrains Mono', monospace" }}>MOLTING</span>
-          </div>
-          <div style={{ fontFamily: "'Long Cang', cursive", fontSize: 16, color: "var(--ink-2)", marginBottom: 14 }}>
-            {ringCount > 0
-              ? `已蜕皮 ${ringCount} 次,${stats?.last_molting ? `最近一次在 ${fmtTime(stats.last_molting.at)}` : ""}`
-              : "还没蜕过皮。攒够标本,就可以安排第一次。"}
-          </div>
-          {stats?.last_molting && (
-            <div style={{ border: "1px solid var(--line)", borderRadius: 6, padding: "12px 14px", marginBottom: 10 }}>
-              <div style={{ fontSize: 13.5, fontWeight: 600 }}>{stats.last_molting.note || "无备注"}</div>
-              <div style={{ fontSize: 12, color: "var(--ink-2)", marginTop: 3 }}>{fmtTime(stats.last_molting.at)}</div>
-            </div>
+        <Panel
+          title="成长记录"
+          eyebrow="MILESTONES"
+          actions={(
+            <StatusBadge tone={overview.schedule?.enabled ? "success" : "neutral"}>
+              {overview.schedule?.enabled
+                ? `夜间计划 ${String(overview.schedule.hour).padStart(2, "0")}:${String(overview.schedule.minute).padStart(2, "0")}`
+                : "夜间计划未开启"}
+            </StatusBadge>
           )}
-          <div style={{ fontSize: 11.5, color: "var(--ink-3)", borderTop: "1px dashed var(--line)", paddingTop: 10, lineHeight: 1.7 }}>
-            真正的微调流水线(GRPO/LoRA)接入后,这个按钮会触发训练任务;现在它先记一笔蜕皮台账。
+        >
+          <div className="evolve-milestone">
+            <div>
+              <span className="evolve-milestone-label">最近一次成长节点</span>
+              <strong>{overview.stats?.last_molting ? fmtTime(overview.stats.last_molting.at) : "还没有记录"}</strong>
+            </div>
+            {overview.stats?.last_molting?.note && <p>{overview.stats.last_molting.note}</p>}
           </div>
-          <button
-            onClick={schedule}
-            disabled={scheduled}
-            style={{
-              marginTop: 14, height: 38, width: "100%", borderRadius: 9, border: "none",
-              background: scheduled ? "var(--line)" : "var(--seal)", color: "oklch(98% 0.01 85)",
-              fontSize: 13.5, fontWeight: 600, cursor: scheduled ? "default" : "pointer",
-              fontFamily: "'Noto Serif SC', serif",
-            }}
-          >{scheduled ? "已记入今夜梦中 ✓" : "安排下一次蜕皮 · 今夜梦中 →"}</button>
-          <button onClick={() => go("dream")} style={{ ...linkBtn, marginTop: 10 }}>去看梦境 →</button>
-        </TapeCard>
+          <p className="evolve-panel-note">
+            “记录成长节点”只写入本机成长台账，不会启动 GEPA、LoRA 或 GRPO 训练。
+          </p>
+          <div className="evolve-inline-actions">
+            <button
+              type="button"
+              className="evolve-primary-button"
+              disabled={recording || recorded}
+              onClick={onRecordGrowth}
+            >
+              {recording ? "记录中…" : recorded ? "已记入成长台账 ✓" : "记录成长节点"}
+            </button>
+            <button type="button" className="evolve-link-button" onClick={onGoDream}>去看梦境 →</button>
+          </div>
+          {recordError && <div className="evolve-inline-error" role="alert">{recordError}</div>}
+        </Panel>
       </div>
-
-      {/* Harness self-evolution (skills via GEPA) */}
-      <HarnessInbox />
-      <HarnessLearn />
-      <HarnessEvolve />
-      <HarnessCurate />
-      <HarnessLedger />
     </div>
   );
 }
-
-function LedgerRow({ k, v, last }: { k: string; v: string; last?: boolean }) {
-  return (
-    <div style={{
-      display: "flex", justifyContent: "space-between", alignItems: "baseline",
-      padding: "13px 0", borderTop: "1px solid var(--line)",
-      ...(last ? { borderBottom: "1px solid var(--line)" } : {}),
-    }}>
-      <span style={{ fontSize: 13.5 }}>{k}</span>
-      <span style={{ fontSize: 14, fontWeight: 600, fontFamily: "'JetBrains Mono', monospace" }}>{v}</span>
-    </div>
-  );
-}
-
-const linkBtn: React.CSSProperties = {
-  marginTop: 12, border: "none", background: "transparent", padding: 0,
-  cursor: "pointer", fontSize: 12.5, color: "var(--indigo)",
-};
-
-const dataPanel: React.CSSProperties = {
-  marginTop: 12, border: "1px dashed var(--line-2)", borderRadius: 6,
-  padding: "12px 14px", fontFamily: "'JetBrains Mono', monospace",
-  fontSize: 11.5, color: "var(--ink-2)",
-  display: "flex", flexDirection: "column", gap: 8,
-};
-
-const stampBtn: React.CSSProperties = {
-  width: 24, height: 24, flexShrink: 0, borderRadius: 3,
-  border: "1.6px solid", background: "transparent",
-  fontFamily: "'Noto Serif SC', serif", fontSize: 11, fontWeight: 600,
-  cursor: "pointer", transform: "rotate(6deg)", padding: 0,
-};

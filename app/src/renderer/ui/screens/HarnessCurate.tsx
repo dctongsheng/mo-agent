@@ -1,7 +1,7 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { useAppSelector } from "../../store/hooks";
 import { moPortOf } from "../../store/slices/gatewaySlice";
-import { TapeCard } from "../components/TapeCard";
+import { Panel } from "../components/EvolveUi";
 import { PendingRestart } from "../components/PendingRestart";
 import {
   getCuratorStatus, listCuratorSkills, listRetirements, retireSkill, keepSkill,
@@ -30,7 +30,7 @@ const PROVENANCE_LABEL: Record<string, string> = {
 
 /** Curation · 清点技艺 — surfaces Hermes' curator and gates its one
  *  destructive step. */
-export function HarnessCurate() {
+export function HarnessCurate({ active = true }: { active?: boolean } = {}) {
   const moPort = useAppSelector((s) => moPortOf(s.gateway.state));
   const [status, setStatus] = useState<CuratorStatus | null>(null);
   const [props, setProps] = useState<Retirement[]>([]);
@@ -39,16 +39,51 @@ export function HarnessCurate() {
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [showLedger, setShowLedger] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [loadErrors, setLoadErrors] = useState<string[]>([]);
+  const activeRef = useRef(active);
+  const refreshSeq = useRef(0);
+  activeRef.current = active;
 
-  const refresh = useCallback(() => {
-    if (!moPort) return;
-    getCuratorStatus(moPort).then(setStatus).catch(() => {});
-    listRetirements(moPort, "proposed").then((r) => setProps(r.data)).catch(() => {});
-    listArchivedSkills(moPort).then((r) => setArchived(r.data)).catch(() => {});
-    listCuratorSkills(moPort).then((r) => setRows(r.data)).catch(() => {});
+  const refresh = useCallback(async () => {
+    const seq = ++refreshSeq.current;
+    if (!activeRef.current) return;
+    if (!moPort) {
+      setLoading(false);
+      setLoadErrors(["status", "proposals", "archived", "ledger"]);
+      return;
+    }
+    setLoading(true);
+    setLoadErrors([]);
+    const [statusResult, proposalsResult, archivedResult, ledgerResult] = await Promise.allSettled([
+      getCuratorStatus(moPort),
+      listRetirements(moPort, "proposed"),
+      listArchivedSkills(moPort),
+      listCuratorSkills(moPort),
+    ]);
+    if (!activeRef.current || seq !== refreshSeq.current) return;
+    const errors: string[] = [];
+    if (statusResult.status === "fulfilled") setStatus(statusResult.value);
+    else errors.push("status");
+    if (proposalsResult.status === "fulfilled") setProps(proposalsResult.value.data);
+    else errors.push("proposals");
+    if (archivedResult.status === "fulfilled") setArchived(archivedResult.value.data);
+    else errors.push("archived");
+    if (ledgerResult.status === "fulfilled") setRows(ledgerResult.value.data);
+    else errors.push("ledger");
+    setLoadErrors(errors);
+    setLoading(false);
   }, [moPort]);
 
-  useEffect(() => { refresh(); }, [refresh]);
+  useEffect(() => {
+    if (active) refresh();
+  }, [active, refresh]);
+
+  useEffect(() => {
+    if (active) return;
+    refreshSeq.current += 1;
+    setLoading(false);
+  }, [active]);
 
   const act = (p: Promise<any>, ok: (r: any) => string) => {
     setBusy(true);
@@ -74,125 +109,131 @@ export function HarnessCurate() {
 
   const reclaimable = status?.proposed_chars ?? 0;
 
-  const lbl: React.CSSProperties = { display: "flex", flexDirection: "column", gap: 6, fontSize: 12.5, color: "var(--ink-2)" };
-  const numIn: React.CSSProperties = { width: 58, height: 26, borderRadius: 6, border: "1px solid var(--line-2)", background: "transparent", color: "var(--ink-1)", padding: "0 6px", fontSize: 12 };
-  const btn: React.CSSProperties = { border: "1px solid var(--line-2)", background: "transparent", color: "var(--ink-2)", borderRadius: 6, fontSize: 11, padding: "3px 9px", cursor: "pointer" };
-
   return (
-    <div style={{ marginTop: 48 }}>
-      <div style={{ fontSize: 11, letterSpacing: "0.2em", color: "var(--seal)", fontFamily: "'JetBrains Mono', monospace" }}>
-        CURATION · 清点技艺
-      </div>
-      <h2 style={{ margin: "8px 0 6px", fontFamily: "'Noto Serif SC', serif", fontSize: 21, fontWeight: 650 }}>
+    <div className="evolve-workbench">
+      <div className="evolve-eyebrow">CURATION · 清点技艺</div>
+      <h2 className="evolve-workbench-title">
         哪些方子，已经很久没翻开了。
       </h2>
-      <p style={{ margin: 0, fontSize: 13.5, lineHeight: 1.7, color: "var(--ink-2)", maxWidth: 660 }}>
+      <p className="evolve-workbench-description">
         上游的管家会在方子闲置 90 天后自己把它收进箱底 —— 不问、不留痕迹。
         Mo 把这一步改成了提案：收不收，你说了算。收起来的方子只是移进 <code>.archive/</code>，从不删除。
       </p>
 
       <PendingRestart port={moPort} pending={status?.pending} />
 
+      {loadErrors.length > 0 && (
+        <div className="evolve-load-callout" role="status">
+          <span>部分清点台账暂时读不到，已成功读取的内容仍可使用。</span>
+          <button type="button" onClick={refresh}>重试</button>
+        </div>
+      )}
+
       {/* A guard that silently failed to install would leave the UI claiming
           protection that isn't there. Say so loudly. */}
       {status && !status.guard_installed && (
-        <div style={{ marginTop: 14, padding: "10px 14px", borderRadius: 9, fontSize: 12.5,
-                      border: "1px solid var(--seal)", color: "var(--seal)", lineHeight: 1.6 }}>
+        <div className="evolve-alert is-danger" role="alert">
           ⚠ 护栏没装上。{status.clamped
             ? "已把归档期限钉成 100 年作为兜底 —— 定时器够不着，但这是退而求其次。"
             : "定时器仍然活着，可能会自己收走方子。请看引擎日志。"}
         </div>
       )}
 
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 26, marginTop: 26, alignItems: "start" }}>
+      <div className="evolve-panel-grid">
         {/* ---- status + controls ---- */}
-        <TapeCard tapeLeft={true} tapeRotate="2deg" style={{ padding: "22px 24px" }}>
-          <div style={{ fontFamily: "'Noto Serif SC', serif", fontSize: 16, fontWeight: 650, marginBottom: 12 }}>台账</div>
+        <Panel title="台账">
 
-          {status ? (
+          {loading && !status ? (
+            <div className="evolve-state-text">正在读取清点状态…</div>
+          ) : loadErrors.includes("status") && !status ? (
+            <div className="evolve-state-text is-error">清点状态读取失败，请重试。</div>
+          ) : status ? (
             <>
-              <div style={{ fontSize: 13, color: "var(--ink-2)", lineHeight: 1.9 }}>
+              <div className="evolve-stat-line">
                 全部 <b>{status.counts.total ?? 0}</b> 张 ·
                 三十天没动过 <b>{status.counts.stale ?? 0}</b> 张 ·
-                待你定夺 <b style={{ color: "var(--seal)" }}>{status.counts.proposed ?? 0}</b> 张
+                待你定夺 <b className="is-error">{status.counts.proposed ?? 0}</b> 张
                 {!!status.counts.pinned && <> · 钉住 {status.counts.pinned} 张</>}
               </div>
-              <div style={{ fontSize: 12, color: "var(--ink-3)", marginTop: 4, lineHeight: 1.7 }}>
+              <div className="evolve-explainer">
                 这些方子的名字和描述每次开口都要背一遍，合计约 {approxTokens(status.index_chars)} token。
               </div>
               {status.last_run_summary && (
-                <div style={{ fontSize: 11.5, color: "var(--ink-3)", marginTop: 8, fontFamily: "'JetBrains Mono', monospace" }}>
+                <div className="evolve-mono-note">
                   上次清点：{status.last_run_summary}（共 {status.run_count} 次）
                 </div>
               )}
 
-              <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 14 }}>
-                <button disabled={busy} onClick={() => moPort && act(runCurator(moPort, true), (r) => `看过了：会动 ${r.proposed ?? 0} 张`)} style={btn}>只看看会动哪些</button>
-                <button disabled={busy} onClick={() => moPort && act(runCurator(moPort, false), (r) => `清点完成：新增 ${r.proposed ?? 0} 条提案`)} style={btn}>现在清点一次</button>
-                <label style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "var(--ink-2)", cursor: "pointer" }}>
+              <div className="evolve-inline-actions evolve-inline-actions--spaced">
+                <button type="button" disabled={busy} onClick={() => moPort && act(runCurator(moPort, true), (r) => `看过了：会动 ${r.proposed ?? 0} 张`)} className="evolve-secondary-button">只看看会动哪些</button>
+                <button type="button" disabled={busy} onClick={() => moPort && act(runCurator(moPort, false), (r) => `清点完成：新增 ${r.proposed ?? 0} 条提案`)} className="evolve-secondary-button">现在清点一次</button>
+                <label className="evolve-check evolve-check--push">
                   <input type="checkbox" checked={!!status.paused}
                          onChange={(e) => moPort && act(setCuratorPaused(moPort, e.target.checked), () => e.target.checked ? "已暂停清点" : "已恢复清点")} />
                   暂停清点
                 </label>
               </div>
 
-              <div style={{ borderTop: "1px dashed var(--line)", marginTop: 16, paddingTop: 14, display: "flex", gap: 18 }}>
-                <label style={lbl}>闲置多少天算“搁下了”
-                  <input type="number" min={1} max={3650} defaultValue={status.stale_after_days ?? 30} style={numIn}
+              <div className="evolve-subsection evolve-inline-fields">
+                <label className="evolve-field">闲置多少天算“搁下了”
+                  <input type="number" min={1} max={3650} defaultValue={status.stale_after_days ?? 30} className="evolve-number-input"
                          onBlur={(e) => moPort && act(setCuratorThresholds(moPort, { stale_after_days: Number(e.target.value) }), () => "已保存")} />
                 </label>
-                <label style={lbl}>多少天后提议收起
-                  <input type="number" min={1} max={36500} defaultValue={status.archive_after_days ?? 90} style={numIn}
+                <label className="evolve-field">多少天后提议收起
+                  <input type="number" min={1} max={36500} defaultValue={status.archive_after_days ?? 90} className="evolve-number-input"
                          onBlur={(e) => moPort && act(setCuratorThresholds(moPort, { archive_after_days: Number(e.target.value) }), () => "已保存")} />
                 </label>
               </div>
             </>
           ) : (
-            <div style={{ fontSize: 13, color: "var(--ink-3)" }}>读不到清点状态。</div>
+            <div className="evolve-state-text">读不到清点状态。</div>
           )}
-          {notice && <div style={{ fontSize: 11.5, color: "var(--moss)", marginTop: 10, lineHeight: 1.6 }}>{notice}</div>}
-        </TapeCard>
+          {notice && <div className="evolve-notice is-success">{notice}</div>}
+        </Panel>
 
         {/* ---- proposals ---- */}
-        <TapeCard tapeLeft={false} tapeRotate="-2deg" style={{ padding: "22px 24px" }}>
-          <div style={{ fontFamily: "'Noto Serif SC', serif", fontSize: 16, fontWeight: 650 }}>待退休</div>
+        <Panel title="待退休">
           {props.length > 0 && (
-            <div style={{ fontSize: 12, color: "var(--ink-3)", margin: "4px 0 12px", lineHeight: 1.7 }}>
+            <div className="evolve-panel-intro">
               收起这 {props.length} 张，每次开口少背约 {approxTokens(reclaimable)} token。
-              <div style={{ marginTop: 3 }}>
+              <div>
                 其中一些是之前几次自动清点标下的 —— 那几次没有告诉你。
               </div>
             </div>
           )}
 
-          {props.length === 0 ? (
-            <div style={{ fontSize: 13, color: "var(--ink-3)", marginTop: 10 }}>没有待定夺的方子。</div>
+          {loading && props.length === 0 ? (
+            <div className="evolve-state-text">正在读取退休提案…</div>
+          ) : loadErrors.includes("proposals") && props.length === 0 ? (
+            <div className="evolve-state-text is-error">退休提案读取失败，不能判断当前是否为空。</div>
+          ) : props.length === 0 ? (
+            <div className="evolve-state-text">没有待定夺的方子。</div>
           ) : (
-            <div style={{ display: "flex", flexDirection: "column", gap: 10, maxHeight: 400, overflowY: "auto" }}>
+            <div className="evolve-proposal-list">
               {props.map((p) => (
-                <div key={p.skill} style={{ border: "1px solid var(--line)", borderRadius: 8, padding: "10px 12px" }}>
-                  <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
-                    <span style={{ fontSize: 13, fontFamily: "'JetBrains Mono', monospace" }}>{p.skill}</span>
-                    <span style={{ fontSize: 10.5, color: "var(--ink-3)", border: "1px solid var(--line-2)", borderRadius: 99, padding: "1px 7px" }}>
+                <div key={p.skill} className="evolve-proposal-card">
+                  <div className="evolve-proposal-card__header">
+                    <span className="evolve-record-name">{p.skill}</span>
+                    <span className="evolve-chip evolve-chip--compact">
                       {PROVENANCE_LABEL[p.provenance ?? ""] ?? p.provenance}
                     </span>
                     {p.reason === "agent-delete" && (
-                      <span style={{ fontSize: 10.5, color: "var(--moon)" }}>小貘想删掉它</span>
+                      <span className="evolve-small-tag is-warning">小貘想删掉它</span>
                     )}
                   </div>
                   {p.description && (
-                    <div style={{ fontSize: 11.5, color: "var(--ink-3)", marginTop: 3, lineHeight: 1.5 }}>{p.description}</div>
+                    <div className="evolve-record-description">{p.description}</div>
                   )}
-                  <div style={{ fontSize: 11, color: "var(--ink-3)", marginTop: 4, fontFamily: "'JetBrains Mono', monospace" }}>
+                  <div className="evolve-proposal-card__meta">
                     {p.use_count ? `用过 ${p.use_count} 次` : "从未用过"}
                     {p.days_idle != null && ` · 已闲置 ${p.days_idle} 天`}
                     {!!p.skill_md_chars && ` · 占常驻提示约 ${approxTokens(p.skill_md_chars)} token`}
                     {p.has_version_history && " · 有改写历史"}
                   </div>
-                  <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
-                    <button disabled={busy} onClick={() => retire(p.skill)} style={{ ...btn, borderColor: "var(--seal)", color: "var(--seal)" }}>收起来</button>
-                    <button disabled={busy} onClick={() => keep(p.skill, false)} style={btn}>留着</button>
-                    <button disabled={busy} onClick={() => keep(p.skill, true)} style={btn}>钉住不再问</button>
+                  <div className="evolve-inline-actions evolve-proposal-card__actions">
+                    <button type="button" disabled={busy} onClick={() => retire(p.skill)} className="evolve-secondary-button is-danger">收起来</button>
+                    <button type="button" disabled={busy} onClick={() => keep(p.skill, false)} className="evolve-secondary-button">留着</button>
+                    <button type="button" disabled={busy} onClick={() => keep(p.skill, true)} className="evolve-secondary-button">钉住不再问</button>
                   </div>
                 </div>
               ))}
@@ -200,55 +241,63 @@ export function HarnessCurate() {
           )}
 
           {/* ---- archived ---- */}
-          <div style={{ borderTop: "1px dashed var(--line)", marginTop: 18, paddingTop: 14 }}>
-            <div style={{ fontSize: 13.5, fontWeight: 600, marginBottom: 8 }}>已收起的方子</div>
-            {archived.length === 0 ? (
-              <div style={{ fontSize: 12, color: "var(--ink-3)" }}>还没有收起过任何方子。</div>
+          <div className="evolve-subsection">
+            <div className="evolve-subsection-title">已收起的方子</div>
+            {loading && archived.length === 0 ? (
+              <div className="evolve-state-text">正在读取已收起的方子…</div>
+            ) : loadErrors.includes("archived") && archived.length === 0 ? (
+              <div className="evolve-state-text is-error">已收起的方子读取失败。</div>
+            ) : archived.length === 0 ? (
+              <div className="evolve-state-text">还没有收起过任何方子。</div>
             ) : (
-              <div style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: 160, overflowY: "auto" }}>
+              <div className="evolve-compact-list evolve-compact-list--short">
                 {archived.map((a) => (
-                  <div key={a.name} style={{ display: "flex", alignItems: "center", gap: 10, fontSize: 12, fontFamily: "'JetBrains Mono', monospace", color: "var(--ink-2)" }}>
-                    <span style={{ flex: 1 }}>{a.name}</span>
-                    {a.drifted_from_head && <span style={{ fontSize: 10.5, color: "var(--moon)" }}>与上次采纳不同</span>}
-                    <button disabled={busy} onClick={() => restore(a.name)} style={btn}>取回来</button>
+                  <div key={a.name} className="evolve-compact-row">
+                    <span className="evolve-compact-name">{a.name}</span>
+                    {a.drifted_from_head && <span className="evolve-small-tag is-warning">与上次采纳不同</span>}
+                    <button type="button" disabled={busy} onClick={() => restore(a.name)} className="evolve-mini-button">取回来</button>
                   </div>
                 ))}
               </div>
             )}
           </div>
-        </TapeCard>
+        </Panel>
       </div>
 
       {/* ---- full usage ledger ---- */}
-      <div style={{ marginTop: 20 }}>
-        <button onClick={() => setShowLedger((v) => !v)} style={{ ...btn, fontSize: 12 }}>
+      <div className="evolve-ledger-toggle">
+        <button type="button" onClick={() => setShowLedger((v) => !v)} className="evolve-secondary-button">
           {showLedger ? "收起" : "展开"}全部技艺 · 使用台账（{rows.length}）
         </button>
         {showLedger && (
-          <TapeCard tapeLeft={true} tapeRotate="1deg" style={{ padding: "18px 22px", marginTop: 12 }}>
-            <div style={{ maxHeight: 420, overflowY: "auto", fontSize: 12, fontFamily: "'JetBrains Mono', monospace" }}>
-              {rows.map((r) => (
-                <div key={r.name} style={{ display: "flex", alignItems: "center", gap: 10, padding: "5px 0", borderBottom: "1px solid var(--line)", color: "var(--ink-2)" }}>
-                  <span style={{ flex: 1, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{r.name}</span>
-                  {r.protected && <span style={{ fontSize: 10, color: "var(--moss)" }}>受保护</span>}
-                  {r.pinned && <span style={{ fontSize: 10, color: "var(--indigo)" }}>已钉住</span>}
-                  <span style={{ fontSize: 10.5, color: "var(--ink-3)", width: 46 }}>{PROVENANCE_LABEL[r.provenance ?? ""] ?? ""}</span>
-                  <span style={{ fontSize: 11, color: r.state === "stale" ? "var(--moon)" : "var(--ink-3)", width: 40 }}>{r.state}</span>
-                  <span style={{ fontSize: 11, color: "var(--ink-3)", width: 70, textAlign: "right" }}>
+          <div className="evolve-ledger-toggle__panel">
+            <Panel title="全部技艺使用台账">
+            <div className="evolve-usage-ledger">
+              {loadErrors.includes("ledger") && rows.length === 0 ? (
+                <div className="evolve-state-text is-error">完整使用台账读取失败，请重试。</div>
+              ) : rows.map((r) => (
+                <div key={r.name} className="evolve-usage-row">
+                  <span className="evolve-compact-name">{r.name}</span>
+                  {r.protected && <span className="evolve-small-tag is-success">受保护</span>}
+                  {r.pinned && <span className="evolve-small-tag is-info">已钉住</span>}
+                  <span className="evolve-usage-row__provenance">{PROVENANCE_LABEL[r.provenance ?? ""] ?? ""}</span>
+                  <span className={`evolve-usage-row__state${r.state === "stale" ? " is-warning" : ""}`}>{r.state}</span>
+                  <span className="evolve-usage-row__metric">
                     {r.days_idle != null ? `${r.days_idle} 天` : "—"}
                   </span>
-                  <span style={{ fontSize: 11, color: "var(--ink-3)", width: 60, textAlign: "right" }}>
+                  <span className="evolve-usage-row__metric">
                     {r.use_count ? `用 ${r.use_count}` : "未用过"}
                   </span>
                   {moPort && (
-                    <button onClick={() => act(pinSkill(moPort, r.name, !r.pinned), () => r.pinned ? "已取消钉住" : "已钉住")} style={{ ...btn, fontSize: 10, padding: "1px 7px" }}>
+                    <button type="button" onClick={() => act(pinSkill(moPort, r.name, !r.pinned), () => r.pinned ? "已取消钉住" : "已钉住")} className="evolve-mini-button">
                       {r.pinned ? "取消钉住" : "钉住"}
                     </button>
                   )}
                 </div>
               ))}
             </div>
-          </TapeCard>
+            </Panel>
+          </div>
         )}
       </div>
     </div>

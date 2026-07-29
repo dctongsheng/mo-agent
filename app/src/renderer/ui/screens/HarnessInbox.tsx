@@ -1,8 +1,8 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { useAppSelector } from "../../store/hooks";
 import { moPortOf } from "../../store/slices/gatewaySlice";
 import { useAppState } from "../appState";
-import { TapeCard } from "../components/TapeCard";
+import { DialogShell, Panel } from "../components/EvolveUi";
 import {
   listPending, getPendingDetail, approvePending, rejectPending,
   setPendingPolicy, getReviewLog, setReviewIntervals,
@@ -24,7 +24,7 @@ const ORIGIN_LABEL: Record<string, string> = {
 };
 
 /** 待办 — everything the agent wants to change about itself, waiting on you. */
-export function HarnessInbox() {
+export function HarnessInbox({ active = true }: { active?: boolean } = {}) {
   const moPort = useAppSelector((s) => moPortOf(s.gateway.state));
   const s = useAppState();
   const [list, setList] = useState<PendingList | null>(null);
@@ -33,14 +33,68 @@ export function HarnessInbox() {
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [showLog, setShowLog] = useState(false);
+  const [loading, setLoading] = useState(active);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [logLoaded, setLogLoaded] = useState(false);
+  const [listFailed, setListFailed] = useState(false);
+  const [logFailed, setLogFailed] = useState(false);
+  const activeRef = useRef(active);
+  const refreshSeq = useRef(0);
+  const detailSeq = useRef(0);
+  activeRef.current = active;
 
-  const refresh = useCallback(() => {
-    if (!moPort) return;
-    listPending(moPort).then(setList).catch(() => {});
-    getReviewLog(moPort).then((r) => setLog(r.data)).catch(() => {});
+  const refresh = useCallback(async () => {
+    const seq = ++refreshSeq.current;
+    if (!activeRef.current) return;
+    if (!moPort) {
+      setLoading(false);
+      setLoadError("本机进化服务尚未连接，暂时无法读取待办。");
+      setListFailed(true);
+      setLogFailed(true);
+      return;
+    }
+
+    setLoading(true);
+    const [listResult, logResult] = await Promise.allSettled([
+      listPending(moPort),
+      getReviewLog(moPort),
+    ]);
+    if (!activeRef.current || seq !== refreshSeq.current) return;
+
+    const failed: string[] = [];
+    if (listResult.status === "fulfilled") {
+      setList(listResult.value);
+      setListFailed(false);
+    } else {
+      failed.push("待办清单");
+      setListFailed(true);
+    }
+    if (logResult.status === "fulfilled") {
+      setLog(logResult.value.data);
+      setLogLoaded(true);
+      setLogFailed(false);
+    } else {
+      failed.push("复盘记录");
+      setLogFailed(true);
+    }
+    setLoadError(failed.length
+      ? `未能从本机读取${failed.join("、")}。请确认引擎仍在运行。`
+      : null);
+    setLoading(false);
   }, [moPort]);
 
-  useEffect(() => { refresh(); }, [refresh]);
+  useEffect(() => {
+    if (active) void refresh();
+  }, [active, refresh]);
+
+  useEffect(() => {
+    if (active) return;
+    refreshSeq.current += 1;
+    detailSeq.current += 1;
+    setLoading(false);
+    setOpen(null);
+    setShowLog(false);
+  }, [active]);
 
   const act = (p: Promise<any>, ok: (r: any) => string) => {
     setBusy(true);
@@ -50,109 +104,123 @@ export function HarnessInbox() {
 
   const view = (it: PendingItem) => {
     if (!moPort) return;
-    if (it.kind === "retirement") { s.go("evolve"); return; }
-    if (it.kind === "learn-draft") { s.go("evolve"); return; }
+    const seq = ++detailSeq.current;
+    if (it.kind === "retirement") { s.goEvolve("curation"); return; }
+    if (it.kind === "learn-draft") { s.goEvolve("learn"); return; }
     getPendingDetail(moPort, it.subsystem!, it.id)
-      .then((d) => setOpen({ ...d, _item: it })).catch(() => {});
+      .then((d) => {
+        if (activeRef.current && seq === detailSeq.current) setOpen({ ...d, _item: it });
+      })
+      .catch(() => {});
   };
 
   const items = list?.data ?? [];
   const bg = list?.counts?.background ?? 0;
   const rv = list?.review;
 
-  const btn: React.CSSProperties = { border: "1px solid var(--line-2)", background: "transparent", color: "var(--ink-2)", borderRadius: 6, fontSize: 11.5, padding: "3px 10px", cursor: "pointer" };
-  const numIn: React.CSSProperties = { width: 54, height: 26, borderRadius: 6, border: "1px solid var(--line-2)", background: "transparent", color: "var(--ink-1)", padding: "0 6px", fontSize: 12 };
-
   return (
-    <div style={{ marginTop: 48 }}>
-      <div style={{ fontSize: 11, letterSpacing: "0.2em", color: "var(--seal)", fontFamily: "'JetBrains Mono', monospace" }}>
-        PENDING · 待办
-      </div>
-      <h2 style={{ margin: "8px 0 6px", fontFamily: "'Noto Serif SC', serif", fontSize: 21, fontWeight: 650 }}>
+    <div className="evolve-workbench">
+      <div className="evolve-eyebrow">PENDING · 待办</div>
+      <h2 className="evolve-workbench-title">
         它想改自己的地方,都在这儿等你点头。
       </h2>
-      <p style={{ margin: 0, fontSize: 13.5, lineHeight: 1.7, color: "var(--ink-2)", maxWidth: 680 }}>
+      <p className="evolve-workbench-description">
         小貘每聊十来轮就会在后台另开一个自己,复盘刚才那段对话,然后往磁盘里写记忆和技艺 ——
         上游是直接写、不留记录、也没有开关。Mo 把这些改动拦下来放这里,你看过再算数。
         你当面说的话（「记住我用 pnpm」）不受影响,照旧立刻生效。
       </p>
 
       {list && !list.shim_installed && (
-        <div style={{ marginTop: 14, padding: "10px 14px", borderRadius: 9, fontSize: 12.5,
-                      border: "1px solid var(--seal)", color: "var(--seal)", lineHeight: 1.6 }}>
+        <div className="evolve-alert is-danger" role="alert">
           ⚠ 拦截没装上 —— 后台复盘写的东西目前是直接落盘的。请看引擎日志。
         </div>
       )}
 
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 26, marginTop: 26, alignItems: "start" }}>
-        <TapeCard tapeLeft={true} tapeRotate="2deg" style={{ padding: "22px 24px" }}>
-          <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: 12 }}>
-            <span style={{ fontFamily: "'Noto Serif SC', serif", fontSize: 16, fontWeight: 650 }}>等你定夺</span>
-            {!!items.length && (
-              <span style={{ fontSize: 12, color: "var(--ink-3)" }}>
-                {items.length} 项{bg ? ` · 其中 ${bg} 项是它自己想改的` : ""}
-              </span>
-            )}
+      {loadError && (
+        <div className="evolve-load-callout is-danger" role="alert">
+          <div className="evolve-load-callout__copy">
+            <strong>本机待办读取失败</strong>
+            <div>{loadError}{(list || logLoaded) ? " 已读到的内容仍保留。" : ""}</div>
           </div>
+          <button type="button" onClick={() => void refresh()} disabled={loading}>
+            {loading ? "重试中…" : "重试"}
+          </button>
+        </div>
+      )}
 
-          {items.length === 0 ? (
-            <div style={{ fontSize: 13, color: "var(--ink-3)", lineHeight: 1.7 }}>
+      <div className="evolve-panel-grid">
+        <Panel
+          title="等你定夺"
+          actions={items.length > 0 ? (
+            <span className="evolve-panel-count">
+              {items.length} 项{bg ? ` · 其中 ${bg} 项是它自己想改的` : ""}
+            </span>
+          ) : undefined}
+        >
+
+          {loading && list === null ? (
+            <div className="evolve-state-text">
+              正在读取本机待办……
+            </div>
+          ) : list === null ? (
+            <div className="evolve-state-text is-error">
+              待办清单尚未读取成功，不能判断现在是否为空。
+            </div>
+          ) : listFailed && items.length === 0 ? (
+            <div className="evolve-state-text is-error">
+              本次没有读到待办清单，不能确认现在是否为空。
+            </div>
+          ) : items.length === 0 ? (
+            <div className="evolve-state-text">
               没有待办。它最近没打算改自己什么。
             </div>
           ) : (
-            <div style={{ display: "flex", flexDirection: "column", gap: 8, maxHeight: 360, overflowY: "auto" }}>
+            <div className="evolve-review-list">
               {items.map((it) => (
-                <div key={`${it.kind}:${it.id}`} onClick={() => view(it)} style={{
-                  display: "flex", alignItems: "center", gap: 10, padding: "10px 12px",
-                  border: "1px solid var(--line)", borderRadius: 8, cursor: "pointer",
-                  background: "var(--card)",
-                }}>
-                  <span style={{ fontSize: 10.5, color: "var(--ink-3)", border: "1px solid var(--line-2)",
-                                 borderRadius: 99, padding: "1px 7px", flexShrink: 0 }}>
+                <div key={`${it.kind}:${it.id}`} className="evolve-review-row">
+                  <span className="evolve-chip evolve-chip--compact">
                     {KIND_LABEL[it.kind] ?? it.kind}
                   </span>
-                  <span style={{ flex: 1, minWidth: 0 }}>
-                    <span style={{ fontSize: 13, fontFamily: "'JetBrains Mono', monospace", display: "block",
-                                   whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{it.title}</span>
-                    {it.summary && <span style={{ fontSize: 11, color: "var(--ink-3)" }}>{it.summary}</span>}
-                  </span>
-                  <span style={{ fontSize: 10.5, flexShrink: 0,
-                                 color: it.origin === "background_review" ? "var(--moon)" : "var(--ink-3)" }}>
+                  <button type="button" className="evolve-record-main" onClick={() => view(it)}>
+                    <span className="evolve-record-name">{it.title}</span>
+                    {it.summary && <span className="evolve-record-description">{it.summary}</span>}
+                  </button>
+                  <span className={`evolve-review-origin${it.origin === "background_review" ? " is-warning" : ""}`}>
                     {ORIGIN_LABEL[it.origin] ?? it.origin}
                   </span>
-                  <span style={{ fontSize: 11, color: "var(--ink-3)", flexShrink: 0 }}>{fmt(it.at)}</span>
+                  <span className="evolve-record-time">{fmt(it.at)}</span>
                 </div>
               ))}
             </div>
           )}
-          {notice && <div style={{ fontSize: 11.5, color: "var(--moss)", marginTop: 10 }}>{notice}</div>}
-        </TapeCard>
+          {notice && <div className="evolve-notice is-success">{notice}</div>}
+        </Panel>
 
-        <TapeCard tapeLeft={false} tapeRotate="-2deg" style={{ padding: "22px 24px" }}>
-          <div style={{ fontFamily: "'Noto Serif SC', serif", fontSize: 16, fontWeight: 650, marginBottom: 10 }}>后台复盘</div>
-          <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, color: "var(--ink-2)", cursor: "pointer" }}>
+        <Panel title="后台复盘">
+          <label className="evolve-check">
             <input type="checkbox" checked={!!list?.background_only}
+                   disabled={!list}
                    onChange={(e) => moPort && act(setPendingPolicy(moPort, e.target.checked),
                      () => e.target.checked ? "后台改动会先到这儿" : "后台改动恢复直接落盘")} />
             后台改动先经过我
           </label>
-          <div style={{ fontSize: 11, color: "var(--ink-3)", marginTop: 6, lineHeight: 1.7 }}>
+          <div className="evolve-form-hint">
             关掉它,后台复盘写的记忆和技艺会像上游那样直接落盘。
           </div>
 
           {rv && (
-            <div style={{ borderTop: "1px dashed var(--line)", marginTop: 14, paddingTop: 12 }}>
-              <div style={{ fontSize: 12.5, color: "var(--ink-2)", marginBottom: 8 }}>多久复盘一次</div>
-              <div style={{ display: "flex", gap: 16, alignItems: "center", fontSize: 12, color: "var(--ink-2)" }}>
-                <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <div className="evolve-subsection">
+              <div className="evolve-subsection-title">多久复盘一次</div>
+              <div className="evolve-inline-fields">
+                <label className="evolve-field evolve-field--inline">
                   记忆每
-                  <input type="number" min={0} max={10000} defaultValue={rv.memory_nudge_interval ?? 10} style={numIn}
+                  <input type="number" min={0} max={10000} defaultValue={rv.memory_nudge_interval ?? 10} className="evolve-number-input"
                          onBlur={(e) => moPort && act(setReviewIntervals(moPort, { memory: Number(e.target.value) }), () => "已保存")} />
                   轮
                 </label>
-                <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                <label className="evolve-field evolve-field--inline">
                   技艺每
-                  <input type="number" min={0} max={10000} defaultValue={rv.skill_nudge_interval ?? 10} style={numIn}
+                  <input type="number" min={0} max={10000} defaultValue={rv.skill_nudge_interval ?? 10} className="evolve-number-input"
                          onBlur={(e) => moPort && act(setReviewIntervals(moPort, { skills: Number(e.target.value) }), () => "已保存")} />
                   轮
                 </label>
@@ -160,79 +228,88 @@ export function HarnessInbox() {
               {/* There is no background_review.enabled flag anywhere in the
                   core. Saying "set it very high" is the honest instruction;
                   implying a toggle exists would not be. */}
-              <div style={{ fontSize: 11, color: "var(--ink-3)", marginTop: 8, lineHeight: 1.7 }}>
+              <div className="evolve-form-hint">
                 上游没有「关掉后台复盘」这个开关 —— 把这两个数字调得很大,是唯一的关法。
               </div>
             </div>
           )}
 
-          <div style={{ borderTop: "1px dashed var(--line)", marginTop: 14, paddingTop: 12 }}>
-            <button onClick={() => setShowLog((v) => !v)} style={btn}>
-              {showLog ? "收起" : "展开"}复盘记录（{log.length}）
+          <div className="evolve-subsection">
+            <button type="button" onClick={() => setShowLog((v) => !v)} className="evolve-secondary-button">
+              {showLog ? "收起" : "展开"}复盘记录（{logLoaded && !(logFailed && log.length === 0) ? log.length : "—"}）
             </button>
             {showLog && (
-              <div style={{ marginTop: 10, maxHeight: 220, overflowY: "auto", display: "flex", flexDirection: "column", gap: 8 }}>
-                {log.length === 0 ? (
-                  <div style={{ fontSize: 12, color: "var(--ink-3)", lineHeight: 1.7 }}>
+              <div className="evolve-review-log">
+                {!logLoaded || (logFailed && log.length === 0) ? (
+                  <div className="evolve-state-text is-error">
+                    复盘记录尚未读取成功，不能判断是否为空。
+                  </div>
+                ) : log.length === 0 ? (
+                  <div className="evolve-state-text">
                     还没有记录。从现在起它每次复盘做了什么都会记在这里 ——
                     以前这些动作只在终端里闪一下就没了。
                   </div>
                 ) : log.map((e, i) => (
-                  <div key={i} style={{ fontSize: 11.5, color: "var(--ink-2)", lineHeight: 1.6 }}>
-                    <span style={{ color: "var(--ink-3)", fontFamily: "'JetBrains Mono', monospace" }}>{fmt(e.at)}</span>
-                    {e.actions.map((a, j) => <div key={j} style={{ marginLeft: 8 }}>· {a}</div>)}
+                  <div key={i} className="evolve-review-log__entry">
+                    <span className="evolve-record-time">{fmt(e.at)}</span>
+                    {e.actions.map((a, j) => <div key={j} className="evolve-review-log__action">· {a}</div>)}
                   </div>
                 ))}
               </div>
             )}
           </div>
-        </TapeCard>
+        </Panel>
       </div>
 
       {/* ---- staged write modal ---- */}
       {open && (
-        <div onClick={() => setOpen(null)} style={{
-          position: "fixed", inset: 0, background: "oklch(20% 0.02 60 / 0.45)",
-          display: "flex", alignItems: "center", justifyContent: "center", zIndex: 50, padding: 40,
-        }}>
-          <div onClick={(e) => e.stopPropagation()} style={{
-            background: "var(--card)", borderRadius: 12, boxShadow: "var(--shadow)",
-            width: "min(820px, 92vw)", maxHeight: "84vh", display: "flex", flexDirection: "column",
-            border: "1px solid var(--line)",
-          }}>
-            <div style={{ padding: "18px 22px", borderBottom: "1px solid var(--line)", display: "flex", alignItems: "baseline", gap: 12 }}>
-              <span style={{ fontFamily: "'Noto Serif SC', serif", fontSize: 17, fontWeight: 650 }}>
-                {open._item?.title}
-              </span>
-              <span style={{ fontSize: 11.5, color: open.origin === "background_review" ? "var(--moon)" : "var(--ink-3)" }}>
-                {ORIGIN_LABEL[open.origin] ?? open.origin}
-              </span>
-              <span style={{ marginLeft: "auto", cursor: "pointer", color: "var(--ink-3)", fontSize: 18 }} onClick={() => setOpen(null)}>×</span>
-            </div>
-            <div style={{ flex: 1, overflowY: "auto", padding: "16px 22px" }}>
-              {open.summary && <div style={{ fontSize: 12.5, color: "var(--ink-2)", marginBottom: 12 }}>{open.summary}</div>}
-              <pre style={{ margin: 0, fontFamily: "'JetBrains Mono', monospace", fontSize: 12, lineHeight: 1.6, whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
-                {open.diff
-                  ? open.diff.split("\n").map((ln: string, i: number) => (
-                      <div key={i} style={{
-                        color: ln.startsWith("+") && !ln.startsWith("+++") ? "var(--moss)"
-                          : ln.startsWith("-") && !ln.startsWith("---") ? "var(--seal)"
-                          : "var(--ink-2)",
-                      }}>{ln || " "}</div>
-                    ))
-                  : JSON.stringify(open.payload ?? {}, null, 2)}
-              </pre>
-            </div>
-            <div style={{ padding: "14px 22px", borderTop: "1px solid var(--line)", display: "flex", gap: 12, justifyContent: "flex-end" }}>
-              <button disabled={busy} onClick={() => moPort && act(rejectPending(moPort, open.subsystem, open.id), () => "已弃用")} style={{ ...btn, height: 36, padding: "0 16px" }}>弃用</button>
-              <button disabled={busy} onClick={() => moPort && act(approvePending(moPort, open.subsystem, open.id), (r) => `${r.message} · 下次启动生效`)} style={{
-                height: 36, padding: "0 18px", borderRadius: 9, border: "none", background: "var(--seal)",
-                color: "oklch(98% 0.01 85)", fontSize: 13, fontWeight: 600, cursor: "pointer",
-                fontFamily: "'Noto Serif SC', serif",
-              }}>收下</button>
-            </div>
+        <DialogShell
+          title={open._item?.title || "待确认改动"}
+          onClose={() => setOpen(null)}
+          footer={(
+            <>
+              <button
+                type="button"
+                disabled={busy}
+                className="evolve-secondary-button"
+                onClick={() => moPort && act(rejectPending(moPort, open.subsystem, open.id), () => "已弃用")}
+              >
+                弃用
+              </button>
+              <button
+                type="button"
+                disabled={busy}
+                className="evolve-primary-button"
+                onClick={() => moPort && act(
+                  approvePending(moPort, open.subsystem, open.id),
+                  (r) => `${r.message} · 下次启动生效`,
+                )}
+              >
+                收下
+              </button>
+            </>
+          )}
+        >
+          <div className="evolve-dialog-meta">
+            <span className={open.origin === "background_review" ? "is-warning" : ""}>
+              {ORIGIN_LABEL[open.origin] ?? open.origin}
+            </span>
+            {open.summary && <span>{open.summary}</span>}
           </div>
-        </div>
+          {open.diff ? (
+            <div className="evolve-dialog-code" role="region" aria-label="改动内容">
+              {open.diff.split("\n").map((ln: string, i: number) => (
+                <div key={i} style={{
+                  color: ln.startsWith("+") && !ln.startsWith("+++") ? "var(--moss)"
+                    : ln.startsWith("-") && !ln.startsWith("---") ? "var(--seal)"
+                    : "var(--ink-2)",
+                }}>{ln || " "}</div>
+              ))}
+            </div>
+          ) : (
+            <pre className="evolve-dialog-code">{JSON.stringify(open.payload ?? {}, null, 2)}</pre>
+          )}
+        </DialogShell>
       )}
     </div>
   );

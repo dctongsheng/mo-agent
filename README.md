@@ -1,136 +1,197 @@
 <h1 align="center">貘 · Mo</h1>
-<h3 align="center">A desktop self-evolving agent.</h3>
+<h3 align="center">双 Agent 协作引擎驱动的本地桌面智能体</h3>
 
 <p align="center">
-  A local-first desktop agent that doesn't just run tasks — it rewrites its own skills overnight to get better at them. Built on the <a href="https://github.com/NousResearch/hermes-agent">Hermes Agent</a> core, wrapped in a calm, paper-textured desktop app.
+  <strong>小貘负责把事情做完，夜貘负责让它下一次做得更好。</strong>
+</p>
+
+<p align="center">
+  <strong>简体中文</strong> · <a href="README_EN.md">English</a>
 </p>
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green?style=for-the-badge" alt="MIT License"></a>
+  <img src="https://img.shields.io/badge/architecture-Dual_Agent-C53422?style=for-the-badge" alt="Dual Agent">
   <img src="https://img.shields.io/badge/electron-33-47848F?style=for-the-badge&logo=electron&logoColor=white" alt="Electron 33">
   <img src="https://img.shields.io/badge/react-19-61DAFB?style=for-the-badge&logo=react&logoColor=black" alt="React 19">
   <img src="https://img.shields.io/badge/python-3.11-3776AB?style=for-the-badge&logo=python&logoColor=white" alt="Python 3.11">
   <img src="https://img.shields.io/badge/platform-macOS-black?style=for-the-badge&logo=apple" alt="macOS">
 </p>
 
+<p align="center">
+  貘是一款本地优先的桌面 Agent：白天由<strong>小貘</strong>执行任务，夜间由<strong>夜貘</strong>复盘真实轨迹、打磨技能。<br>
+  所有候选改动都要经过评测、门禁和你的确认，才会进入下一次会话。
+</p>
+
+![貘的双 Agent 引擎：小貘与夜貘](docs/images/mo-dual-agent.jpg)
+
 ---
 
-## What makes Mo different
+## 双 Agent 引擎架构
 
-Most agents are static: the prompt and skills you ship are the prompt and skills you keep. **Mo evolves.** It records the trajectories of the work it does for you, then — on a schedule or on demand — runs a [GEPA](https://arxiv.org/abs/2507.19457)-style optimization loop that rewrites one of its own skills, scores it against *your own chat history* with an LLM judge, and only arms the deploy button if a statistical gate says the improvement is real.
+貘的核心不是“接两个模型”，而是两个职责、状态与交接边界清晰的 Agent 协作：
 
-The result is an agent whose competence is not frozen at install time. The skills you use most get sharper the more you use them.
+| Agent | 角色 | 主要职责 | 输出 |
+|---|---|---|---|
+| **小貘 · Work Agent** | 本体 / `default` profile | 对话、工具调用、终端与文件任务；记录真实执行轨迹和反馈 | 任务结果、会话、轨迹标本 |
+| **夜貘 · Evolution Agent** | 进化分身 / `ye-mao-evolve` profile | 阅读轨迹摘要、选择待优化技能、说明原因并提出可验证预测；驱动 GEPA 技能优化 | 待审候选、评测证据、进化记录 |
 
-- 🧬 **Self-evolving skills** — a nightly optimizer rotates through your custom skills, improving them one at a time. Candidates are judged on the exchanges you marked 好评/差评, must clear a paired-bootstrap significance gate and a regression pin set, and pass size / growth / structure / injection constraints. Nothing auto-deploys, and every accepted rewrite is snapshotted and revertible.
-- 📚 **Teach it a trick** — point it at a directory, a URL, or the conversation you just had, and it drafts a new skill in a sandbox. You read the draft before anything touches your real skills.
-- 🧹 **Nothing retires behind your back** — Hermes archives skills unused for 90 days on a timer. Mo turns that into a proposal and shows what each one costs your always-on prompt.
-- 📥 **A待办 list for the agent's own edits** — the background review fork writes memories and skills to disk every ~10 turns. Those land in an inbox you approve; what you say directly still takes effect immediately.
-- 🖥️ **Real desktop agent** — chat, terminal, file access and a tool-calling loop, powered by the Hermes Agent core.
-- 🏠 **Local-first & private** — point it at local models (Ollama) or any OpenAI-compatible endpoint. Your memory and trajectories stay on your machine.
-- 🧠 **Persistent memory** — long-term semantic memory via a pluggable backend (OpenViking), with recall tuned to skip trivial messages.
-- 🎛️ **Configure once, then just pick** — an endpoint library lets you register a provider once and select models per scenario (chat / embedding / evolution / fine-tuning).
-- 🔬 **Fine-tuning scaffold** — collect trajectories and turn them into datasets for model fine-tuning. *Scaffold only in this build:* dataset generation and a run ledger, without the cloud-training scripts. See [docs/configuration.md](docs/configuration.md#fine-tuning-scaffold-only).
-
-> **Note on language:** Mo's user interface is currently **Chinese-only**. The code, docs and commit history are in English, and PRs adding i18n are very welcome — but if you install it today, expect a Chinese UI.
-
-## Architecture
+两者共享 Hermes Agent 核心、本地技能库、记忆和轨迹数据，但权限并不相同：**夜貘不能绕过你直接部署技能改写**。
 
 ```mermaid
 flowchart LR
-    subgraph App["app/ — Electron desktop (React 19 + Vite)"]
-        UI[Chat · Atelier · Settings · Self-Evolution]
-    end
-    subgraph Server["server/ — Python gateway"]
-        GW["mo-gateway.py<br/>/api/mo/* routes"]
-        MOE["mo_evolve/<br/>judge · gate · archive · safety"]
-        EVO["vendor/evolution<br/>GEPA self-evolution engine"]
-    end
-    subgraph Core["vendor/hermes-agent — Hermes core (Nous Research, MIT)"]
-        AG[Agent runtime · tool loop]
-        MEM[Memory plugins]
-        DASH[FastAPI gateway + model API]
-    end
-
-    UI -- "HTTP (localhost, token auth)" --> GW
-    GW --> DASH
-    GW -- "spawns" --> EVO
-    GW --> MOE
-    EVO --> MOE
-    MOE -- "gated rewrite,<br/>next session" --> AG
-    DASH --> AG
-    AG --> MEM
+    U["你"] --> W["小貘<br/>Work Agent"]
+    W --> T["执行任务<br/>对话 · 工具 · 文件 · 终端"]
+    T --> R["本地轨迹与反馈"]
+    R --> E["夜貘<br/>Evolution Agent"]
+    E --> P["选择技能<br/>提出原因与可验证预测"]
+    P --> G["GEPA 候选优化"]
+    G --> J["LLM Judge + 回归集<br/>安全扫描 + 统计门禁"]
+    J --> H{"你查看 Diff 并确认"}
+    H -- "采纳" --> S["版本化技能库<br/>下次会话生效"]
+    H -- "拒绝" --> A["保留记录，不写回"]
+    S --> W
 ```
 
-- **`app/`** — the desktop application. Its own React UI; talks to the gateway over localhost with a per-boot token.
-- **`server/`** — the Python gateway (`mo-gateway.py`) that mounts Mo's `/api/mo/*` routes onto the Hermes web server; Mo's own self-evolution logic in `server/mo_evolve/` (tiered LLM judge, acceptance gate, versioned skill archive, safety scan) covered by `server/tests/`; and the vendored GEPA engine under `server/vendor/evolution/`.
-- **`vendor/hermes-agent/`** — the vendored Hermes Agent core (Nous Research, MIT). See [Licensing](#licensing).
+这套架构有四个关键点：
 
-See [docs/architecture.md](docs/architecture.md) and [docs/self-evolution.md](docs/self-evolution.md) for details.
+- **角色分离**：工作 Agent 专注完成当前任务，进化 Agent 专注复盘与改进。
+- **真实交接**：小貘产生的本地轨迹与好评 / 差评，是夜貘的评测材料。
+- **证据门禁**：候选必须经过同一批 holdout 样本、LLM Judge、回归 pins、安全约束与统计门禁。
+- **人类最终控制**：没有自动部署；每次采纳都有快照，可以查看、拒绝和回退。
 
-## Quick start
+> 这里的“双 Agent 引擎”指运行在同一 Hermes 核心与本地状态之上的两个协作 Agent 角色 / profile，不是两个彼此隔离的原生 Agent 运行时。夜貘当前的夜间选题仍是一次受控的 LLM 反思调用，而不是拥有完整工具权限的独立 Agent turn；详见[当前边界](#当前状态与边界)。
 
-**Prerequisites**
+## 界面预览
 
-- macOS (Apple Silicon)
+### 自进化中心
+
+统一查看待确认事项、轨迹标本、最近进化、失败记录和已经确认的成长节点。
+
+![貘的自进化中心](docs/images/mo-evolution-center.jpg)
+
+### 夜貘技艺进化
+
+手动选择技能，或让夜貘挑选目标；候选、日志、历史版本与回退入口全部留在本机。
+
+![夜貘的 GEPA 技艺进化界面](docs/images/mo-skill-evolution.jpg)
+
+## 为什么貘不只是另一个聊天壳
+
+- 🐾 **双 Agent 协作** — 小貘执行，夜貘复盘；工作与改进形成闭环。
+- 🧬 **技能自进化** — 按计划或按需运行 GEPA 风格优化，一次只打磨一项技能。
+- 🧪 **用你的真实轨迹评测** — 好评、差评和真实会话进入成对评测，不只依赖合成样本。
+- 🛡️ **有门禁，不裸奔** — 统计显著性、回归 pins、大小 / 结构 / 增长约束和 diff 范围注入扫描共同决定候选是否可采纳。
+- 👁️ **改动先给人看** — 自动流程只生成候选，不自动部署；所有采纳都有快照并可回退。
+- 📚 **教它一手** — 从目录、URL 或当前对话生成技能草稿，确认后再进入真实技能库。
+- 🧹 **技能退休也要确认** — 将 Hermes 的自动归档改为提案，展示长期未使用技能及其 prompt 成本。
+- 🖥️ **真正的桌面 Agent** — 基于 Hermes Agent 核心，支持聊天、工具调用、终端与文件访问。
+- 🏠 **本地优先** — 会话、记忆、轨迹和进化记录存放在你的机器上；支持 Ollama 和 OpenAI-compatible endpoint。
+- 🧠 **持久记忆** — 通过可插拔后端提供长期语义记忆，参考实现使用 OpenViking。
+- 🎛️ **模型按场景配置** — 一次登记 endpoint，再分别选择对话、Embedding、进化与微调模型。
+- 🔬 **模型微调脚手架** — 可收集轨迹、生成数据集并记录运行；当前版本不包含云训练脚本。
+
+> **界面语言：**当前桌面 UI 仅提供中文。代码、提交与部分开发文档使用英文，欢迎贡献 i18n。
+
+## 工程架构
+
+```mermaid
+flowchart LR
+    subgraph App["app/ · Electron 桌面端"]
+        UI["React 19 + Vite<br/>工作台 · 自进化 · 记忆 · 设置"]
+    end
+
+    subgraph Server["server/ · Python 网关与进化控制"]
+        GW["mo-gateway.py<br/>/api/mo/*"]
+        CTRL["mo_evolve/<br/>reflect · judge · gate · safety · archive"]
+        GEPA["vendor/evolution<br/>GEPA 自进化引擎"]
+    end
+
+    subgraph Hermes["vendor/hermes-agent/ · Hermes 核心"]
+        AG["Agent runtime<br/>tool loop"]
+        MEM["Memory plugins"]
+        API["API / dashboard server"]
+    end
+
+    UI -- "localhost + 每次启动 token" --> GW
+    GW --> API
+    API --> AG
+    AG --> MEM
+    GW --> CTRL
+    GW -- "子进程" --> GEPA
+    GEPA --> CTRL
+    CTRL -- "门禁后的候选" --> AG
+```
+
+- **`app/`** — Electron 桌面应用与 React UI，通过 localhost 和每次启动生成的 token 访问后端。
+- **`server/`** — Python 网关；把貘的 `/api/mo/*` 路由挂载到 Hermes Web 服务，并实现评审、门禁、版本归档和安全扫描。
+- **`server/vendor/evolution/`** — 带有貘本地改动的 GEPA 自进化引擎。
+- **`vendor/hermes-agent/`** — vendored Hermes Agent 核心（Nous Research，MIT）。
+
+进一步阅读：[架构说明](docs/architecture.md) · [自进化机制](docs/self-evolution.md) · [配置说明](docs/configuration.md)
+
+## 快速开始
+
+### 前置要求
+
+- macOS（Apple Silicon）
 - Node.js ≥ 18
-- Python 3.11 — `./scripts/setup.sh` creates the venv and installs both the Hermes core dependencies and `dspy` (needed by self-evolution). See [docs/configuration.md](docs/configuration.md) if you set the environment up by hand.
+- Python 3.11
 
-**Run in development**
+### 开发模式运行
 
 ```bash
-# 1. One-time setup: app deps + Python venv for the vendored core
+# 1. 首次安装：应用依赖 + vendored Hermes Python 环境
 ./scripts/setup.sh
 
-# 2. Launch the app (builds main + renderer, then starts Electron)
+# 2. 构建并启动 Electron
 cd app
 npm run dev
 ```
 
-The app spawns `server/mo-gateway.py`, which boots the Hermes gateway and the Mo API, then connects the UI automatically.
+应用会启动 `server/mo-gateway.py`，拉起 Hermes gateway 与貘 API，并自动把桌面 UI 连接到本机服务。
 
-**Configuration** lives in `~/.hermes-mo/` (config, memory, sessions, trajectories). Copy `.env.example` to `~/.hermes-mo/.env` and fill in your model provider keys. See [docs/configuration.md](docs/configuration.md).
+运行数据默认保存在 `~/.hermes-mo/`。将 `.env.example` 复制为 `~/.hermes-mo/.env`，再填写模型服务配置；详见[配置说明](docs/configuration.md)。
 
-## Build a distributable
+## 构建本地安装包
 
 ```bash
 cd app
-npm run dist:local   # unsigned local build → app/release/
+npm run dist:local
 ```
 
-Packaging bundles `server/` and `vendor/hermes-agent/` into the app's resources.
+未签名的本地构建会输出到 `app/release/`，其中包含 `server/` 与 `vendor/hermes-agent/`。
 
-## Status & known limitations
+## 当前状态与边界
 
-**Alpha**, macOS (Apple Silicon) only for now. APIs and layout may change. Issues and PRs welcome.
+项目当前处于 **Alpha**，仅支持 macOS Apple Silicon，API 与界面仍可能变化。
 
-Known limitations, so you can judge fit before installing:
-
-| | |
+| 项目 | 当前边界 |
 |---|---|
-| **Platform** | macOS / Apple Silicon only. No Windows or Linux build. |
-| **UI language** | Chinese only. |
-| **Fine-tuning** | Scaffold only — no cloud-training scripts bundled. |
-| **Tests** | The self-evolution core (`server/mo_evolve/`) is covered by `pytest server/tests` — 246 tests, no network. The gateway's routes, the Electron main process and the UI have no automated coverage; CI additionally runs typecheck, build, engine import and license compliance. |
-| **Network** | The UI loads three webfonts from Google Fonts at launch. Your chats, memory and trajectories never leave your machine, but this one request does — self-host the fonts in `index.html` if you need a fully offline app. |
-| **Self-evolution** | Rewrites skill files on disk. Candidates pass hard constraints, a diff-scoped injection scan and a statistical acceptance gate, and every accept is snapshotted and revertible — but a prompt-injected model can still influence skill text, so review the diff. See [SECURITY.md](SECURITY.md). |
-| **夜貘's autonomy** | It picks its own target, gives a reason and commits to a checkable prediction — but it reasons from a prepared summary rather than a real agent turn with tools, and it can't author, split or retire a skill. See [docs/self-evolution.md](docs/self-evolution.md#what-夜貘-cannot-do-yet). |
+| 平台 | 暂无 Windows / Linux 构建。 |
+| UI 语言 | 仅中文。 |
+| 双 Agent | 小貘是完整工作 Agent；夜貘拥有独立 profile，但夜间目标选择目前是一次基于预制摘要的 LLM 调用，不能自行读取文件或使用工具验证猜想。 |
+| 夜貘能力 | 当前只优化已有技能，不能主动拆分、创建或退休技能；这些流程仍由你发起。 |
+| 模型微调 | 仅脚手架，不包含云训练脚本。 |
+| 自动化测试 | `server/mo_evolve/` 有离线 pytest 覆盖；网关路由、Electron main process 与 UI 目前没有完整自动化覆盖。CI 额外执行 typecheck、build、引擎导入和许可证检查。 |
+| 网络 | UI 启动时会请求 Google Fonts。会话、记忆和轨迹不会因此上传；如需完全离线，请自行托管字体。 |
+| 自进化风险 | 候选经过硬约束、diff 范围安全扫描和统计门禁，但模型仍可能受 prompt injection 影响；采纳前应查看 Diff。 |
 
-## Security
+## 安全
 
-Please report vulnerabilities privately — see [SECURITY.md](SECURITY.md). Do not open a public issue for security problems.
+请按照 [SECURITY.md](SECURITY.md) 私下报告安全问题，不要公开提交漏洞 Issue。
 
-## Contributing
+## 参与贡献
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for project layout and development setup, and [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md). Notable changes are tracked in [CHANGELOG.md](CHANGELOG.md).
+开发环境与目录说明见 [CONTRIBUTING.md](CONTRIBUTING.md)，社区规范见 [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)，重要变更记录在 [CHANGELOG.md](CHANGELOG.md)。
 
-## Licensing
+## 许可证与致谢
 
-Mo is released under the **[MIT License](LICENSE)**.
+貘使用 [MIT License](LICENSE) 发布。
 
-It bundles two MIT-licensed components by **Nous Research**: the **Hermes Agent** core (`vendor/hermes-agent/`) and the **Hermes Agent self-evolution** engine (`server/vendor/evolution/`), the latter carrying Mo-local modifications documented in [`server/vendor/README.md`](server/vendor/README.md). Their copyright notices are preserved in-tree, and the attributions are recorded in [NOTICE](NOTICE) and [THIRD_PARTY_LICENSES/](THIRD_PARTY_LICENSES/). Mo's own components — the gateway extensions and the desktop app — are original work.
+项目内置两个由 **Nous Research** 以 MIT 许可发布的组件：
 
-Some upstream material is deliberately **not** redistributed (Anthropic-licensed skills, conference LaTeX templates, licensed fonts). See [THIRD_PARTY_LICENSES/README.md](THIRD_PARTY_LICENSES/README.md).
+- [Hermes Agent](https://github.com/NousResearch/hermes-agent) 核心：`vendor/hermes-agent/`
+- Hermes Agent Self-Evolution 引擎：`server/vendor/evolution/`，貘的本地修改记录在 [`server/vendor/README.md`](server/vendor/README.md)
 
-## Acknowledgements
-
-Built on the excellent [Hermes Agent](https://github.com/NousResearch/hermes-agent) by [Nous Research](https://nousresearch.com). Self-evolution is inspired by the [GEPA](https://arxiv.org/abs/2507.19457) reflective prompt-optimization approach.
+版权声明与第三方归属保留在 [NOTICE](NOTICE) 和 [THIRD_PARTY_LICENSES/](THIRD_PARTY_LICENSES/) 中。自进化设计受到 [GEPA](https://arxiv.org/abs/2507.19457) 反思式提示优化方法的启发。

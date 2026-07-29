@@ -110,7 +110,7 @@ export function DreamScreen() {
                     <div style={{ fontSize: 14, fontWeight: 600 }}>{item.label}</div>
                     <div style={{ fontSize: 13, color: "var(--ink-2)", marginTop: 3, lineHeight: 1.6 }}>{item.detail}</div>
                     {item.isSeal && (
-                      <button onClick={() => s.go("evolve")} style={{ marginTop: 6, border: "none", background: "transparent", padding: 0, cursor: "pointer", fontSize: 12, color: "var(--indigo)" }}>去进化中心看这一环 →</button>
+                      <button onClick={() => s.goEvolve("overview")} style={{ marginTop: 6, border: "none", background: "transparent", padding: 0, cursor: "pointer", fontSize: 12, color: "var(--indigo)" }}>去进化中心看这一环 →</button>
                     )}
                   </div>
                 </div>

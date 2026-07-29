@@ -25,7 +25,7 @@ export function Shell() {
           }}
         >
           {screen === "home"     && <DeskScreen mainRef={mainRef} />}
-          {screen === "evolve"   && <EvolveScreen />}
+          {screen === "evolve"   && <EvolveScreen mainRef={mainRef} />}
           {screen === "memory"   && <MemoryScreen />}
           {screen === "dream"    && <DreamScreen />}
           {screen === "skills"   && <SkillsScreen />}

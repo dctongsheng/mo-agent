@@ -1,7 +1,7 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { useAppSelector } from "../../store/hooks";
 import { moPortOf } from "../../store/slices/gatewaySlice";
-import { TapeCard } from "../components/TapeCard";
+import { Panel } from "../components/EvolveUi";
 import {
   getLearningGraph, getUsageAnalytics, getCalibration,
   LearningGraph, UsageAnalytics, Calibration,
@@ -21,21 +21,54 @@ function approxTokens(n: number): string {
  *
  *  Memory node ids are positional (`memory:<source>:<index>`) and go stale
  *  after any memory write, so nothing here holds one across an operation. */
-export function HarnessLedger() {
+export function HarnessLedger({ active = true }: { active?: boolean } = {}) {
   const moPort = useAppSelector((s) => moPortOf(s.gateway.state));
   const [graph, setGraph] = useState<LearningGraph | null>(null);
   const [usage, setUsage] = useState<UsageAnalytics | null>(null);
   const [cal, setCal] = useState<Calibration | null>(null);
   const [days, setDays] = useState(30);
+  const [loading, setLoading] = useState(true);
+  const [loadErrors, setLoadErrors] = useState<string[]>([]);
+  const activeRef = useRef(active);
+  const refreshSeq = useRef(0);
+  activeRef.current = active;
 
-  const refresh = useCallback(() => {
-    if (!moPort) return;
-    getLearningGraph(moPort).then(setGraph).catch(() => setGraph(null));
-    getUsageAnalytics(moPort, days).then(setUsage).catch(() => setUsage(null));
-    getCalibration(moPort).then(setCal).catch(() => {});
+  const refresh = useCallback(async () => {
+    const seq = ++refreshSeq.current;
+    if (!activeRef.current) return;
+    if (!moPort) {
+      setLoading(false);
+      setLoadErrors(["graph", "usage", "calibration"]);
+      return;
+    }
+    setLoading(true);
+    setLoadErrors([]);
+    const [graphResult, usageResult, calibrationResult] = await Promise.allSettled([
+      getLearningGraph(moPort),
+      getUsageAnalytics(moPort, days),
+      getCalibration(moPort),
+    ]);
+    if (!activeRef.current || seq !== refreshSeq.current) return;
+    const errors: string[] = [];
+    if (graphResult.status === "fulfilled") setGraph(graphResult.value);
+    else errors.push("graph");
+    if (usageResult.status === "fulfilled") setUsage(usageResult.value);
+    else errors.push("usage");
+    if (calibrationResult.status === "fulfilled") setCal(calibrationResult.value);
+    else errors.push("calibration");
+    setLoadErrors(errors);
+    setLoading(false);
   }, [moPort, days]);
 
-  useEffect(() => { refresh(); }, [refresh]);
+  useEffect(() => {
+    if (active) refresh();
+  }, [active, refresh]);
+
+  useEffect(() => {
+    if (active) return;
+    refreshSeq.current += 1;
+    setLoading(false);
+  }, [active]);
 
   const daily = usage?.daily ?? [];
   const tot = daily.reduce((a, d) => ({
@@ -50,130 +83,150 @@ export function HarnessLedger() {
   const top = (graph?.clusters ?? []).slice().sort((a, b) => b.count - a.count).slice(0, 6);
   const learned = graph?.nodes.filter((n) => n.kind === "skill") ?? [];
 
-  const btn: React.CSSProperties = { border: "1px solid var(--line-2)", background: "transparent", color: "var(--ink-2)", borderRadius: 6, fontSize: 11.5, padding: "2px 9px", cursor: "pointer" };
-
   return (
-    <div style={{ marginTop: 48 }}>
-      <div style={{ fontSize: 11, letterSpacing: "0.2em", color: "var(--seal)", fontFamily: "'JetBrains Mono', monospace" }}>
-        LEDGER · 学到了什么 · 花了多少
-      </div>
-      <h2 style={{ margin: "8px 0 6px", fontFamily: "'Noto Serif SC', serif", fontSize: 21, fontWeight: 650 }}>
+    <div className="evolve-workbench">
+      <div className="evolve-eyebrow">LEDGER · 学到了什么 · 花了多少</div>
+      <h2 className="evolve-workbench-title">
         它到底学到了什么,又值不值。
       </h2>
-      <p style={{ margin: 0, fontSize: 13.5, lineHeight: 1.7, color: "var(--ink-2)", maxWidth: 660 }}>
+      <p className="evolve-workbench-description">
         左边是它真正用过或自己写下的东西,右边是这些事花掉的钱。
         「夜貘的判断准确率」答的是准不准,这一页答的是值不值。
       </p>
 
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 26, marginTop: 26, alignItems: "start" }}>
-        <TapeCard tapeLeft={true} tapeRotate="2deg" style={{ padding: "22px 24px" }}>
-          <div style={{ fontFamily: "'Noto Serif SC', serif", fontSize: 16, fontWeight: 650, marginBottom: 12 }}>学到了什么</div>
-          {!graph ? (
-            <div style={{ fontSize: 13, color: "var(--ink-3)" }}>读不到学习图谱。</div>
+      {loadErrors.length > 0 && (
+        <div className="evolve-load-callout" role="status">
+          <span>部分成效台账暂时读不到，已有数据仍可继续查看。</span>
+          <button type="button" onClick={refresh}>重试</button>
+        </div>
+      )}
+
+      <div className="evolve-panel-grid">
+        <Panel title="学到了什么">
+          {loading && !graph ? (
+            <div className="evolve-state-text">正在读取学习图谱…</div>
+          ) : loadErrors.includes("graph") && !graph ? (
+            <div className="evolve-state-text is-error">学习图谱读取失败，不能判断当前是否为空。</div>
+          ) : !graph ? (
+            <div className="evolve-state-text">学习图谱尚未生成。</div>
           ) : learned.length === 0 ? (
-            <div style={{ fontSize: 13, color: "var(--ink-3)", lineHeight: 1.7 }}>
+            <div className="evolve-state-text">
               还没有它用过或自己写下的技艺 —— 图谱只收这两类,内置但没碰过的不算。
             </div>
           ) : (
             <>
-              <div style={{ fontSize: 13, color: "var(--ink-2)", lineHeight: 1.9 }}>
+              <div className="evolve-stat-line">
                 用过或自己写的技艺 <b>{learned.length}</b> 条 ·
                 记忆 <b>{graph.memory?.length ?? 0}</b> 段 ·
                 互相牵连 <b>{graph.edges?.length ?? 0}</b> 处
               </div>
               {!!top.length && (
-                <div style={{ marginTop: 12, display: "flex", flexWrap: "wrap", gap: 6 }}>
+                <div className="evolve-chip-list">
                   {top.map((c) => (
-                    <span key={c.category} style={{ fontSize: 11, color: "var(--ink-2)",
-                          border: "1px solid var(--line-2)", borderRadius: 99, padding: "2px 9px" }}>
+                    <span key={c.category} className="evolve-chip">
                       {c.category} · {c.count}
                     </span>
                   ))}
                 </div>
               )}
-              <div style={{ marginTop: 14, maxHeight: 240, overflowY: "auto", display: "flex", flexDirection: "column", gap: 5 }}>
+              <div className="evolve-compact-list">
                 {learned.slice()
                   .sort((a, b) => (b.useCount ?? 0) - (a.useCount ?? 0))
                   .map((n) => (
-                  <div key={n.id} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12,
-                                           fontFamily: "'JetBrains Mono', monospace", color: "var(--ink-2)" }}>
-                    <span style={{ flex: 1, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{n.label}</span>
-                    {n.createdBy === "agent" && <span style={{ fontSize: 10, color: "var(--indigo)" }}>自学</span>}
-                    {n.pinned && <span style={{ fontSize: 10, color: "var(--moss)" }}>钉住</span>}
-                    <span style={{ fontSize: 11, color: "var(--ink-3)" }}>用过 {n.useCount ?? 0}</span>
+                  <div key={n.id} className="evolve-compact-row">
+                    <span className="evolve-compact-name">{n.label}</span>
+                    {n.createdBy === "agent" && <span className="evolve-small-tag is-info">自学</span>}
+                    {n.pinned && <span className="evolve-small-tag is-success">钉住</span>}
+                    <span className="evolve-record-meta">用过 {n.useCount ?? 0}</span>
                   </div>
                 ))}
               </div>
             </>
           )}
-        </TapeCard>
+        </Panel>
 
-        <TapeCard tapeLeft={false} tapeRotate="-2deg" style={{ padding: "22px 24px" }}>
-          <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: 12 }}>
-            <span style={{ fontFamily: "'Noto Serif SC', serif", fontSize: 16, fontWeight: 650 }}>花了多少</span>
-            <span style={{ marginLeft: "auto", display: "flex", gap: 6 }}>
+        <Panel
+          title="花了多少"
+          actions={(
+            <div className="evolve-segmented-actions" aria-label="用量统计周期">
               {[7, 30, 90].map((d) => (
-                <button key={d} onClick={() => setDays(d)} style={{
-                  ...btn, ...(days === d ? { borderColor: "var(--seal)", color: "var(--seal)" } : {}),
-                }}>{d} 天</button>
+                <button
+                  key={d}
+                  type="button"
+                  onClick={() => setDays(d)}
+                  className={`evolve-secondary-button${days === d ? " is-active" : ""}`}
+                  aria-pressed={days === d}
+                >
+                  {d} 天
+                </button>
               ))}
-            </span>
-          </div>
+            </div>
+          )}
+        >
 
-          {!usage || daily.length === 0 ? (
-            <div style={{ fontSize: 13, color: "var(--ink-3)" }}>这段时间没有用量记录。</div>
+          {loading && !usage ? (
+            <div className="evolve-state-text">正在读取用量记录…</div>
+          ) : loadErrors.includes("usage") && !usage ? (
+            <div className="evolve-state-text is-error">用量记录读取失败，不能判断当前是否为空。</div>
+          ) : !usage || daily.length === 0 ? (
+            <div className="evolve-state-text">这段时间没有用量记录。</div>
           ) : (
             <>
-              <div style={{ fontSize: 13, color: "var(--ink-2)", lineHeight: 1.9 }}>
+              <div className="evolve-stat-line">
                 对话 <b>{tot.sessions}</b> 次 · 请求 <b>{tot.calls}</b> 次
               </div>
-              <div style={{ fontSize: 12.5, color: "var(--ink-2)", lineHeight: 1.9, marginTop: 2 }}>
+              <div className="evolve-stat-line evolve-stat-line--secondary">
                 读进 {approxTokens(tot.input)} · 写出 {approxTokens(tot.output)} ·
-                缓存命中 <b style={{ color: "var(--moss)" }}>{approxTokens(tot.cache)}</b>
+                缓存命中 <b className="is-success">{approxTokens(tot.cache)}</b>
               </div>
               {tot.cost > 0 && (
-                <div style={{ fontSize: 13, color: "var(--ink-2)", marginTop: 4 }}>
+                <div className="evolve-cost-line">
                   约 <b>${tot.cost.toFixed(2)}</b>
                 </div>
               )}
               {/* Cache reads are why the no-hot-swap rule is worth the
                   inconvenience — showing the number makes that concrete. */}
               {tot.cache > 0 && (
-                <div style={{ fontSize: 11, color: "var(--ink-3)", marginTop: 6, lineHeight: 1.7 }}>
+                <div className="evolve-explainer">
                   缓存命中的部分几乎不要钱 —— 这就是「改动等下次启动生效」换来的东西：
                   会话中途改提示词会把这块缓存全丢掉。
                 </div>
               )}
 
-              <div style={{ display: "flex", alignItems: "flex-end", gap: 2, height: 56, marginTop: 14 }}>
+              <div className="evolve-bar-chart" aria-label={`${days} 天 token 用量`}>
                 {daily.slice(-30).map((d) => {
                   const v = (d.input_tokens || 0) + (d.output_tokens || 0);
                   const max = Math.max(...daily.map((x) => (x.input_tokens || 0) + (x.output_tokens || 0)), 1);
                   return (
-                    <div key={d.day} title={`${d.day} · ${approxTokens(v)}`} style={{
-                      flex: 1, height: `${Math.max(2, (v / max) * 100)}%`,
-                      background: "var(--indigo)", opacity: 0.55, borderRadius: 2,
-                    }} />
+                    <div
+                      key={d.day}
+                      className="evolve-bar-chart__bar"
+                      title={`${d.day} · ${approxTokens(v)}`}
+                      style={{ "--bar-height": `${Math.max(2, (v / max) * 100)}%` } as React.CSSProperties}
+                    />
                   );
                 })}
               </div>
-              <div style={{ fontSize: 10.5, color: "var(--ink-3)", marginTop: 4, fontFamily: "'JetBrains Mono', monospace" }}>
+              <div className="evolve-chart-range">
                 {daily[0]?.day} → {daily[daily.length - 1]?.day}
               </div>
             </>
           )}
 
           {cal && cal.total > 0 && (
-            <div style={{ borderTop: "1px dashed var(--line)", marginTop: 14, paddingTop: 12,
-                          fontSize: 12.5, color: "var(--ink-2)", lineHeight: 1.7 }}>
+            <div className="evolve-subsection evolve-calibration">
               夜貘事先说会怎么变、事后核对：
-              <span style={{ fontFamily: "'JetBrains Mono', monospace", marginLeft: 4,
-                             color: (cal.accuracy ?? 0) >= 0.6 ? "var(--moss)" : "var(--moon)" }}>
+              <span className={(cal.accuracy ?? 0) >= 0.6 ? "is-success" : "is-warning"}>
                 {cal.verified}/{cal.total}
               </span>
             </div>
           )}
-        </TapeCard>
+          {loadErrors.includes("calibration") && (
+            <div className="evolve-subsection evolve-state-text is-error">
+              夜貘判断准确率暂时读取失败。
+            </div>
+          )}
+        </Panel>
       </div>
     </div>
   );

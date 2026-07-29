@@ -189,7 +189,7 @@ export function Sidebar() {
           return (
             <button
               key={n.key}
-              onClick={() => s.go(n.key)}
+              onClick={() => n.key === "evolve" ? s.goEvolve("overview") : s.go(n.key)}
               style={{
                 display: "flex", alignItems: "center", gap: 12, height: 38,
                 padding: "0 14px", border: `1px solid ${active ? "var(--line)" : "transparent"}`,

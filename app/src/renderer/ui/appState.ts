@@ -8,6 +8,7 @@ import * as gw from "../services/gateway-api";
 import * as mo from "../services/mo-api";
 
 export type Screen = "home" | "evolve" | "memory" | "dream" | "skills" | "settings";
+export type EvolveSection = "overview" | "reviews" | "learn" | "skills" | "curation" | "ledger";
 
 export const EVOLVER_PROFILE_ID = "ye-mao-evolve";
 
@@ -61,6 +62,8 @@ export type Session = {
 
 type AppState = {
   screen: Screen;
+  evolveSection: EvolveSection;
+  setEvolveSection: (section: EvolveSection) => void;
   manualNight: boolean;
   profiles: Profile[];
   currentProfileId: string;
@@ -85,6 +88,7 @@ type AppState = {
 
   // actions
   go: (s: Screen) => void;
+  goEvolve: (section: EvolveSection) => void;
   toggleNight: () => void;
   selectProfile: (id: string) => void;
   toggleProfileMenu: () => void;
@@ -140,6 +144,7 @@ const Ctx = createContext<AppState | null>(null);
 
 export function AppStateProvider({ children }: { children: React.ReactNode }) {
   const [screen, setScreen] = useState<Screen>("home");
+  const [evolveSection, setEvolveSection] = useState<EvolveSection>("overview");
   const [manualNight, setManualNight] = useState(false);
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [currentProfileId, setCurrentProfileId] = useState("default");
@@ -214,6 +219,11 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
     setScreen(s);
     document.body.classList.toggle("night", s === "dream" || manualNight);
   }, [manualNight]);
+
+  const goEvolve = useCallback((section: EvolveSection) => {
+    setEvolveSection(section);
+    go("evolve");
+  }, [go]);
 
   const toggleNight = useCallback(() => {
     setManualNight((n) => {
@@ -339,12 +349,12 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const value: AppState = {
-    screen, manualNight, profiles, currentProfileId, profileMenuOpen,
+    screen, evolveSection, setEvolveSection, manualNight, profiles, currentProfileId, profileMenuOpen,
     sessions, sessionsLoaded, currentSessionId, currentModel, setCurrentModel,
     dollOn, dollForm, dollStatus,
     connMode, autostart, dollDefault, voiceOn,
     msgrs, mcpOn, dreamOn, dreamAnswer,
-    go, toggleNight, selectProfile, toggleProfileMenu, createProfile,
+    go, goEvolve, toggleNight, selectProfile, toggleProfileMenu, createProfile,
     cloneProfile, deleteProfile, refreshSessions, newSession, selectSession, deleteSession,
     renameCurrentSession, cycleDoll, petDoll, hideDoll, showDoll,
     setConnMode: (m) => setConnModeState(m),
