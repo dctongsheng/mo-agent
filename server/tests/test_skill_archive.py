@@ -202,3 +202,32 @@ def test_reverting_a_real_version_still_writes_text(tmp_path):
     ok, _ = revert(arch, target, "arxiv", version=1)
     assert ok
     assert target.read_text(encoding="utf-8") == "V1"
+
+
+def test_a_removed_skill_can_still_be_brought_back(tmp_path):
+    """Reverting to existed=False removes the directory, at which point a live
+    lookup can't find the skill — but its later versions are still archived.
+    Without a path fallback that text would be unreachable."""
+    from mo_evolve.skill_archive import recorded_path
+
+    arch = tmp_path / "archive"
+    target = tmp_path / "skills" / "brand-new" / "SKILL.md"
+
+    snapshot(arch, target, "brand-new")                       # v1: existed=False
+    apply_atomic(target, "AUTHORED")
+    set_head(arch, "brand-new", 1, "AUTHORED")
+
+    revert(arch, target, "brand-new", version=1)              # v2 = AUTHORED
+    assert not target.exists()
+
+    recovered = recorded_path(arch, "brand-new")
+    assert recovered is not None, "the archive lost track of where it lived"
+
+    ok, _ = revert(arch, recovered, "brand-new", version=2)
+    assert ok
+    assert recovered.read_text(encoding="utf-8") == "AUTHORED"
+
+
+def test_recorded_path_on_an_unknown_skill(tmp_path):
+    from mo_evolve.skill_archive import recorded_path
+    assert recorded_path(tmp_path / "archive", "never-seen") is None

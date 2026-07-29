@@ -151,6 +151,23 @@ def list_versions(archive_dir: Path, skill: str) -> list[dict]:
     return out
 
 
+def recorded_path(archive_dir: Path, skill: str) -> Path | None:
+    """Where this skill's SKILL.md lived, per the newest archive entry.
+
+    Needed because a skill can be reverted to a version recorded with
+    existed=False, which removes it from disk entirely — at which point
+    ``find_skill_file`` can no longer locate it and the text sitting in the
+    archive would be unreachable. The path is only a fallback: after a Hermes
+    ``restore_skill`` the category nesting is flattened, so a live lookup wins
+    whenever one succeeds.
+    """
+    for entry in list_versions(archive_dir, skill):
+        p = entry.get("path")
+        if p:
+            return Path(p)
+    return None
+
+
 def read_version(archive_dir: Path, skill: str, version: int) -> str | None:
     p = skill_dir(archive_dir, skill) / f"v{version:04d}.md"
     if not p.exists():

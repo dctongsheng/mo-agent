@@ -47,36 +47,70 @@ class EvolveStore:
         self.pending_file = self.evolve_dir / "pending.json"
         self.archive_dir = self.evolve_dir / "archive"
         self.pins_dir = self.evolve_dir / "pins"
+        self.learn_runs_file = self.evolve_dir / "learn_runs.json"
+        self.learn_dir = self.evolve_dir / "learn"
         self.skills_dir = self.hermes_root / "skills"
         self.lock = threading.Lock()
         self._bundled_cache: dict = {}
 
+    # ---- ledgers ----
+    # Evolution runs and learn drafts share a shape but not a file. Keeping them
+    # apart matters: reflect.describe_prior_runs() feeds read_runs() straight
+    # into 夜貘's reflection prompt, and learn drafts would pollute a track
+    # record it never made and never predicted.
+
+    def _read_ledger(self, path: Path) -> list:
+        return read_json(path, [])
+
+    def _write_ledger(self, path: Path, rows: list) -> None:
+        self.evolve_dir.mkdir(parents=True, exist_ok=True)
+        write_json(path, rows)
+
+    def _insert(self, path: Path, entry: dict) -> None:
+        with self.lock:
+            rows = self._read_ledger(path)
+            rows.insert(0, entry)
+            self._write_ledger(path, rows)
+
+    def _update(self, path: Path, row_id: str, **fields) -> None:
+        with self.lock:
+            rows = self._read_ledger(path)
+            for r in rows:
+                if r.get("id") == row_id:
+                    r.update(fields)
+                    break
+            self._write_ledger(path, rows)
+
     # ---- runs ----
 
     def read_runs(self) -> list:
-        return read_json(self.runs_file, [])
+        return self._read_ledger(self.runs_file)
 
     def write_runs(self, runs: list) -> None:
-        self.evolve_dir.mkdir(parents=True, exist_ok=True)
-        write_json(self.runs_file, runs)
+        self._write_ledger(self.runs_file, runs)
 
     def insert_run(self, entry: dict) -> None:
-        with self.lock:
-            runs = self.read_runs()
-            runs.insert(0, entry)
-            self.write_runs(runs)
+        self._insert(self.runs_file, entry)
 
     def update_run(self, run_id: str, **fields) -> None:
-        with self.lock:
-            runs = self.read_runs()
-            for r in runs:
-                if r["id"] == run_id:
-                    r.update(fields)
-                    break
-            self.write_runs(runs)
+        self._update(self.runs_file, run_id, **fields)
 
     def get_run(self, run_id: str) -> dict | None:
-        return next((r for r in self.read_runs() if r["id"] == run_id), None)
+        return next((r for r in self.read_runs() if r.get("id") == run_id), None)
+
+    # ---- learn drafts ----
+
+    def read_learn_runs(self) -> list:
+        return self._read_ledger(self.learn_runs_file)
+
+    def insert_learn_run(self, entry: dict) -> None:
+        self._insert(self.learn_runs_file, entry)
+
+    def update_learn_run(self, run_id: str, **fields) -> None:
+        self._update(self.learn_runs_file, run_id, **fields)
+
+    def get_learn_run(self, run_id: str) -> dict | None:
+        return next((r for r in self.read_learn_runs() if r.get("id") == run_id), None)
 
     # ---- pending activation ----
     # Skill writes land on disk immediately but the running gateway keeps

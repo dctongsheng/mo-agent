@@ -290,7 +290,13 @@ export type AcceptResult = {
   activation: "next_start";
 };
 export type AcceptRefusal = {
-  ok: false; error: "gate_failed" | "stale_baseline" | "no_candidate";
+  ok: false;
+  error:
+    // evolve path
+    | "gate_failed" | "stale_baseline" | "no_candidate"
+    // learn path — `invalid_frontmatter` is the one refusal `force` will not
+    // clear, because forcing it installs a skill that can never route.
+    | "invalid_frontmatter" | "name_taken" | "unsafe";
   message: string; verdict?: EvolveGate;
 };
 /** Accepting is refused (409) when the gate failed or the live skill drifted.
@@ -332,6 +338,61 @@ export const rejectEvolveRun = (port: number, id: string) =>
 export const getEvolveRunLog = (port: number, id: string, tail = 400) =>
   moFetch<{ data: string; exists: boolean; total_lines?: number; error?: string }>(
     port, `/api/mo/evolve/runs/${encodeURIComponent(id)}/log?tail=${tail}`);
+// ---------- mo extension: 教它一手 (/learn) ----------
+export type LearnStatus = {
+  ready: boolean; reason: string;
+  /** "unavailable" means the vendored authoring standards couldn't be
+   *  imported — the house rules were NOT applied, and the UI must say so. */
+  standards: "applied" | "unavailable";
+  sandbox: string; timeout: number; pending?: PendingChange[];
+};
+export type LearnValidation = { code: string; message: string; fatal: boolean };
+export type LearnDraftSkill = {
+  name: string; category: string | null; description: string;
+  content: string; files: { path: string; size: number }[]; staged: boolean;
+};
+export type LearnDraft = {
+  id: string; request: string;
+  status: "running" | "done" | "failed" | "accepted" | "rejected";
+  created_at: number; finished_at?: number; error?: string;
+  standards?: "applied" | "unavailable"; staged?: boolean;
+  skill?: LearnDraftSkill; skill_name?: string; description?: string;
+  validation?: LearnValidation[]; findings?: SafetyFinding[];
+  collides_with?: string | null; archive_version?: number;
+};
+
+export const getLearnStatus = (port: number) =>
+  moFetch<LearnStatus>(port, "/api/mo/learn/status");
+export const startLearn = (port: number, request: string) =>
+  moFetch<{ ok: boolean; draft_id?: string; reason?: string }>(
+    port, "/api/mo/learn", { method: "POST", body: JSON.stringify({ request }) });
+export const listLearnDrafts = (port: number) =>
+  moFetch<{ data: LearnDraft[] }>(port, "/api/mo/learn/drafts");
+export const getLearnDraft = (port: number, id: string) =>
+  moFetch<LearnDraft>(port, `/api/mo/learn/drafts/${encodeURIComponent(id)}`);
+/** Refused (409) on a name collision or an injection finding — both forceable.
+ *  `invalid_frontmatter` is refused even with force: a >60-char description
+ *  installs a skill that can never route. */
+export const acceptLearnDraft = async (
+  port: number, id: string, opts: { force?: boolean; name?: string; category?: string } = {},
+): Promise<AcceptResult | AcceptRefusal> => {
+  const res = await moFetchRaw(port, `/api/mo/learn/drafts/${encodeURIComponent(id)}/accept`, {
+    method: "POST", body: JSON.stringify(opts),
+  });
+  if (res.status === 409) {
+    const body = await res.json().catch(() => ({}));
+    const d = body?.detail ?? {};
+    return { ok: false, error: d.error ?? "gate_failed", message: d.message ?? "无法采纳" };
+  }
+  if (!res.ok) throw new Error(`accept failed: ${res.status}`);
+  return res.json();
+};
+export const rejectLearnDraft = (port: number, id: string) =>
+  moFetch(port, `/api/mo/learn/drafts/${encodeURIComponent(id)}/reject`, { method: "POST" });
+export const getLearnLog = (port: number, id: string, tail = 400) =>
+  moFetch<{ data: string; exists: boolean; total_lines?: number }>(
+    port, `/api/mo/learn/drafts/${encodeURIComponent(id)}/log?tail=${tail}`);
+
 // ---------- mo extension: curation (清点技艺) ----------
 // Hermes' curator retires skills on a 90-day timer by moving their directories.
 // Mo intercepts that and turns it into a proposal — `guard_installed` reports

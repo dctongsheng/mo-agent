@@ -4,6 +4,7 @@ import { moPortOf } from "../../store/slices/gatewaySlice";
 import { useAppState } from "../appState";
 import { GrowthRings } from "../components/GrowthRings";
 import { TapeCard } from "../components/TapeCard";
+import { HarnessLearn } from "./HarnessLearn";
 import { HarnessEvolve } from "./HarnessEvolve";
 import { HarnessCurate } from "./HarnessCurate";
 import {
@@ -168,6 +169,7 @@ export function EvolveScreen() {
       </div>
 
       {/* Harness self-evolution (skills via GEPA) */}
+      <HarnessLearn />
       <HarnessEvolve />
       <HarnessCurate />
     </div>

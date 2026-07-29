@@ -522,6 +522,7 @@ def _mount_mo_routes(app) -> None:
     from mo_evolve import reflect as _reflect
     from mo_evolve import verify as _verify
     from mo_evolve import curator as _curator
+    from mo_evolve import learn as _learn
 
     _store = EvolveStore(_hermes_root)
     _evolve_lock = _store.lock  # also serializes the fine-tune run ledger below
@@ -884,6 +885,187 @@ def _mount_mo_routes(app) -> None:
             raise HTTPException(409, detail=refused.to_detail())
         return result.to_dict()
 
+    # ---- 教它一手 (/learn) ----
+    # Hermes can author a skill from a directory, a URL, or the conversation you
+    # just had. Mo runs that turn against a sandbox HERMES_HOME and reviews the
+    # result before anything reaches the user's skills dir.
+
+    _LEARN_TIMEOUT = int(os.environ.get("MO_LEARN_TIMEOUT", "600"))
+
+    def _spawn_learn(request: str) -> dict:
+        ok, why = _engine_ready()
+        if not ok:
+            return {"ok": False, "reason": why}
+        agent_root = os.environ.get("HERMES_AGENT_ROOT", "")
+        launcher = Path(agent_root) / "hermes" if agent_root else None
+        if not launcher or not launcher.exists():
+            return {"ok": False, "reason": "找不到 hermes 启动器"}
+
+        draft_id = uuid.uuid4().hex[:12]
+        run_cwd = _store.learn_dir / draft_id
+        run_cwd.mkdir(parents=True, exist_ok=True)
+        log_path = run_cwd / "run.log"
+
+        prompt, standards = _learn.build_prompt(request)
+        sandbox, note = _learn.ensure_sandbox(_hermes_root)
+
+        entry = {"id": draft_id, "request": request[:2000], "status": "running",
+                 "created_at": time.time(), "cwd": str(run_cwd),
+                 "standards": standards, "sandbox": str(sandbox)}
+        if note:
+            entry["error"] = note
+        _store.insert_learn_run(entry)
+
+        env = dict(os.environ)
+        # The sandbox is shaped <root>/profiles/mo-learn on purpose: a pre-set
+        # HERMES_HOME is only trusted unconditionally when its parent dir is
+        # named `profiles`, otherwise an active_profile file can redirect the
+        # run into the user's real skills tree.
+        env["HERMES_HOME"] = str(sandbox)
+        env.pop("HERMES_PROFILE", None)
+        # -z is the oneshot path: full toolset, prints only the final block.
+        # Note we pass the BUILT prompt — `-q "/learn ..."` would be sent to the
+        # model as literal text, because slash dispatch only exists in the REPL.
+        cmd = [sys.executable, str(launcher), "-z", prompt]
+
+        def _runner():
+            try:
+                with log_path.open("w", encoding="utf-8") as logf:
+                    proc = subprocess.run(cmd, cwd=str(run_cwd), env=env,
+                                          stdout=logf, stderr=subprocess.STDOUT,
+                                          timeout=_LEARN_TIMEOUT)
+                rc = proc.returncode
+            except subprocess.TimeoutExpired:
+                _store.update_learn_run(draft_id, status="failed",
+                                        error=f"超时（{_LEARN_TIMEOUT}s）",
+                                        finished_at=time.time())
+                return
+            except Exception as exc:
+                _store.update_learn_run(draft_id, status="failed", error=str(exc),
+                                        finished_at=time.time())
+                return
+
+            drafts = _learn.harvest(sandbox)
+            if not drafts:
+                _store.update_learn_run(
+                    draft_id, status="failed", rc=rc, finished_at=time.time(),
+                    error="这次没有写出技艺（见日志）")
+                return
+
+            draft = drafts[0]
+            # Keep the sandbox copy so sidecar files survive the reset before
+            # the next run.
+            keep = run_cwd / "draft"
+            try:
+                import shutil        # local: the closure-level import is far below
+                src = sandbox / "skills"
+                if src.exists():
+                    shutil.copytree(src, keep, dirs_exist_ok=True)
+                    for cand in keep.rglob("SKILL.md"):
+                        draft["_source_dir"] = str(cand.parent)
+                        break
+            except Exception:
+                pass
+
+            existing = {s["name"] for s in _store.list_skills()}
+            findings = _learn.validate_draft(draft, existing)
+            try:
+                from mo_evolve import safety as _safety_mod
+                safety_findings = [f.to_dict() for f in
+                                   _safety_mod.scan_added_lines(draft["content"], "")]
+            except Exception:
+                safety_findings = []
+
+            _store.update_learn_run(
+                draft_id, status="done", rc=rc, finished_at=time.time(),
+                skill=draft, validation=findings, findings=safety_findings,
+                staged=bool(draft.get("staged")),
+                collides_with=(draft.get("name") if draft.get("name") in existing else None))
+
+        threading.Thread(target=_runner, daemon=True, name=f"learn-{draft_id}").start()
+        return {"ok": True, "draft_id": draft_id}
+
+    @router.get("/learn/status")
+    def learn_status():
+        ok, why = _engine_ready()
+        agent_root = os.environ.get("HERMES_AGENT_ROOT", "")
+        launcher = (Path(agent_root) / "hermes") if agent_root else None
+        if ok and (not launcher or not launcher.exists()):
+            ok, why = False, "找不到 hermes 启动器"
+        _, standards = _learn.build_prompt("probe")
+        return {"ready": ok, "reason": why, "standards": standards,
+                "sandbox": str(_learn.sandbox_home(_hermes_root)),
+                "timeout": _LEARN_TIMEOUT,
+                "pending": _store.read_pending()}
+
+    @router.post("/learn")
+    async def learn_start(request: Request):
+        body = await request.json()
+        req = str(body.get("request", "")).strip()
+        if not req:
+            raise HTTPException(400, "说点什么让它学")
+        return _spawn_learn(req)
+
+    @router.get("/learn/drafts")
+    def learn_drafts():
+        # Omit the body — the list view only needs the headline.
+        out = []
+        for d in _store.read_learn_runs():
+            row = {k: v for k, v in d.items() if k != "skill"}
+            sk = d.get("skill") or {}
+            row["skill_name"] = sk.get("name")
+            row["description"] = sk.get("description")
+            out.append(row)
+        return {"data": out}
+
+    @router.get("/learn/drafts/{draft_id}")
+    def learn_draft_detail(draft_id: str):
+        d = _store.get_learn_run(draft_id)
+        if not d:
+            raise HTTPException(404, "draft not found")
+        return d
+
+    @router.post("/learn/drafts/{draft_id}/accept")
+    async def learn_accept(draft_id: str, request: Request):
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        d = _store.get_learn_run(draft_id)
+        if not d or not d.get("skill"):
+            raise HTTPException(404, "draft not found")
+        draft = dict(d["skill"])
+        if body.get("name"):
+            draft["name"] = str(body["name"]).strip()
+        if body.get("category") is not None:
+            draft["category"] = str(body["category"]).strip() or None
+        try:
+            res = _learn.apply_draft(_store, draft, force=bool(body.get("force", False)))
+        except _accept.AcceptRefused as refused:
+            raise HTTPException(409, detail=refused.to_detail())
+        _store.update_learn_run(draft_id, status="accepted", applied_at=time.time(),
+                                applied_to=res.applied_to,
+                                archive_version=res.archive_version)
+        return res.to_dict()
+
+    @router.post("/learn/drafts/{draft_id}/reject")
+    def learn_reject(draft_id: str):
+        _store.update_learn_run(draft_id, status="rejected", rejected_at=time.time())
+        return {"ok": True}
+
+    @router.get("/learn/drafts/{draft_id}/log")
+    def learn_log(draft_id: str, tail: int = 400):
+        d = _store.get_learn_run(draft_id)
+        if not d:
+            raise HTTPException(404, "draft not found")
+        log_path = Path(d.get("cwd", "")) / "run.log"
+        if not log_path.exists():
+            return {"data": "", "exists": False, "total_lines": 0}
+        lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+        total = len(lines)
+        return {"data": "\n".join(lines[-tail:] if tail else lines),
+                "exists": True, "total_lines": total}
+
     # ---- curation (清点技艺) ----
     # Hermes' curator decides what's dead weight; Mo decides nothing without
     # you. These routes surface the former and gate the latter.
@@ -1053,6 +1235,12 @@ def _mount_mo_routes(app) -> None:
             body = {}
         version = body.get("version")
         target = _store.find_skill_file(skill)
+        if target is None:
+            # A skill reverted to a version recorded with existed=False is gone
+            # from disk, so the live lookup fails — but its later versions are
+            # still in the archive. Fall back to the recorded path so that
+            # revert-of-revert can bring it back.
+            target = _archive.recorded_path(_store.archive_dir, skill)
         if target is None:
             raise HTTPException(404, "target skill not found")
         ok, msg = _archive.revert(_store.archive_dir, target, skill,
