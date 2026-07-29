@@ -596,6 +596,20 @@ export type EvolveSel = {
   reflect_model: string;
   endpoints: Endpoint[];
 };
+/** 小貘's own chat model, chosen from the endpoint library.
+ *  Before this, the library fed embedding and GEPA but not the model you
+ *  actually talk to — that came from Hermes' separate provider registry, which
+ *  the library never wrote to. */
+export type MainModelSel = {
+  endpoint_id: string; model: string; provider: string; endpoints: Endpoint[];
+};
+export const getMainModel = (port: number) =>
+  moFetch<MainModelSel>(port, "/api/mo/models/main");
+export const setMainModel = (port: number, endpoint_id: string, model: string) =>
+  moFetch<MainModelSel & { activation?: string }>(port, "/api/mo/models/main", {
+    method: "PUT", body: JSON.stringify({ endpoint_id, model }),
+  });
+
 export const getEmbeddingConfig = (port: number) => moFetch<EmbeddingSel>(port, "/api/mo/models/embedding");
 export const setEmbeddingConfig = (port: number, patch: { endpoint_id: string; model: string; vlm_model?: string; dimension?: number }) =>
   moFetch<EmbeddingSel>(port, "/api/mo/models/embedding", { method: "PUT", body: JSON.stringify(patch) });

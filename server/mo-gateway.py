@@ -2032,6 +2032,58 @@ def _mount_mo_routes(app) -> None:
                 return e.get("id", "")
         return ""
 
+    def _provider_slug(name: str) -> str:
+        """Hermes derives a provider slug from the entry name: custom:<lower>."""
+        return "custom:" + (name or "").strip().lower()
+
+    def _sync_endpoints_to_providers() -> tuple[bool, str]:
+        """Mirror Mo's endpoint library into Hermes' `custom_providers`.
+
+        Two registries existed with no connection between them: Mo's
+        endpoints.json (which feeds embedding + GEPA) and Hermes'
+        custom_providers (which is what /api/model/options builds the 灶台
+        picker from). Adding an endpoint in Mo therefore did nothing for 小貘's
+        own chat model — the models were right there in the library and simply
+        unreachable from the picker.
+
+        Mo-owned entries are marked so a hand-written provider is never
+        clobbered, and so an endpoint deleted here is removed there too.
+        """
+        try:
+            from hermes_cli.config import load_config, save_config
+        except Exception as exc:
+            return False, f"config 不可读：{exc}"
+        try:
+            cfg = load_config() or {}
+            existing = list(cfg.get("custom_providers") or [])
+            # Keep everything the user wrote by hand; replace only our own.
+            kept = [e for e in existing if not e.get("_mo_endpoint_id")]
+
+            mine = []
+            for ep in _read_endpoints():
+                models = list(ep.get("models") or [])
+                if not ep.get("base_url"):
+                    continue
+                # Carry the previous default model across a re-sync so picking
+                # a model in 灶台 isn't undone by a later "检测模型".
+                prev = next((e for e in existing
+                             if e.get("_mo_endpoint_id") == ep["id"]), {})
+                default = prev.get("model") or (models[0] if models else "")
+                mine.append({
+                    "name": ep.get("name", ""),
+                    "base_url": ep.get("base_url", ""),
+                    "api_key": ep.get("api_key", ""),
+                    "api_mode": "openai_chat",
+                    "model": default,
+                    "models": models,
+                    "_mo_endpoint_id": ep["id"],
+                })
+            cfg["custom_providers"] = kept + mine
+            save_config(cfg)
+            return True, f"synced {len(mine)}"
+        except Exception as exc:
+            return False, str(exc)
+
     def _endpoints_public() -> list:
         return [{"id": e["id"], "name": e.get("name", ""), "base_url": e.get("base_url", ""),
                  "models": e.get("models", []), "api_key_set": bool(e.get("api_key"))}
@@ -2054,6 +2106,7 @@ def _mount_mo_routes(app) -> None:
                     "models": list(body.get("models", []) or [])})
         _mo_config_dir.mkdir(parents=True, exist_ok=True)
         _write_json(_endpoints_file, eps)
+        _sync_endpoints_to_providers()
         return {"data": _endpoints_public()}
 
     @router.put("/endpoints/{ep_id}")
@@ -2071,6 +2124,7 @@ def _mount_mo_routes(app) -> None:
                 if body.get("api_key"):
                     e["api_key"] = str(body["api_key"]).strip()
                 _write_json(_endpoints_file, eps)
+                _sync_endpoints_to_providers()
                 return {"data": _endpoints_public()}
         raise HTTPException(404, "endpoint not found")
 
@@ -2078,6 +2132,7 @@ def _mount_mo_routes(app) -> None:
     def endpoints_delete(ep_id: str):
         eps = [e for e in _read_endpoints() if e["id"] != ep_id]
         _write_json(_endpoints_file, eps)
+        _sync_endpoints_to_providers()
         return {"data": _endpoints_public()}
 
     @router.post("/endpoints/{ep_id}/detect")
@@ -2100,7 +2155,93 @@ def _mount_mo_routes(app) -> None:
                 e["models"] = models
                 _write_json(_endpoints_file, eps)
                 break
+        # Newly detected models are what the picker will offer.
+        _sync_endpoints_to_providers()
         return {"ok": True, "models": models}
+
+    def _sync_providers_at_startup() -> None:
+        """Make endpoints added before this sync existed visible in 灶台,
+        without the user having to re-save each one. Defined here, after the
+        helpers it calls — a thread started earlier in the closure could run
+        before those names were bound."""
+        try:
+            ok, why = _sync_endpoints_to_providers()
+            if not ok:
+                logging.getLogger("hermes.desktop").warning(
+                    "endpoint→provider sync failed: %s", why)
+        except Exception as exc:
+            logging.getLogger("hermes.desktop").warning(
+                "endpoint→provider sync failed: %s", exc)
+
+    threading.Thread(target=_sync_providers_at_startup, daemon=True,
+                     name="sync-providers").start()
+
+    # ---- main chat model: pick {endpoint, model} for 小貘 itself ----
+    # The endpoint library fed embedding and GEPA but not the model 小貘 talks
+    # with, which came from Hermes' provider registry — a separate list the
+    # library never wrote to. So an endpoint added here was unusable for the
+    # one thing users most want it for.
+
+    @router.get("/models/main")
+    def models_get_main():
+        try:
+            from hermes_cli.config import load_config
+            cfg = load_config() or {}
+        except Exception:
+            cfg = {}
+        model_cfg = cfg.get("model")
+        current_model = ""
+        current_provider = ""
+        if isinstance(model_cfg, dict):
+            current_model = model_cfg.get("default", "") or ""
+            current_provider = model_cfg.get("provider", "") or ""
+        elif isinstance(model_cfg, str):
+            current_model = model_cfg
+            current_provider = cfg.get("provider") or ""
+
+        # Which library endpoint (if any) backs the current provider.
+        ep_id = ""
+        for e in (cfg.get("custom_providers") or []):
+            if e.get("_mo_endpoint_id") and _provider_slug(e.get("name", "")) == current_provider:
+                ep_id = e["_mo_endpoint_id"]
+                break
+        return {"endpoint_id": ep_id, "model": current_model,
+                "provider": current_provider, "endpoints": _endpoints_public()}
+
+    @router.put("/models/main")
+    async def models_put_main(request: Request):
+        body = await request.json()
+        ep_id = str(body.get("endpoint_id", "")).strip()
+        model = str(body.get("model", "")).strip()
+        if not ep_id or not model:
+            raise HTTPException(400, "endpoint_id and model required")
+
+        ep = next((e for e in _read_endpoints() if e.get("id") == ep_id), None)
+        if ep is None:
+            raise HTTPException(404, "endpoint not found")
+
+        # Make sure the provider entry exists and points at this model, then
+        # set it as the default — writing config directly rather than going
+        # through /api/model/set, which expects a provider that already exists.
+        _sync_endpoints_to_providers()
+        try:
+            from hermes_cli.config import load_config, save_config
+            cfg = load_config() or {}
+            for e in (cfg.get("custom_providers") or []):
+                if e.get("_mo_endpoint_id") == ep_id:
+                    e["model"] = model
+                    break
+            slug = _provider_slug(ep.get("name", ""))
+            mc = cfg.get("model")
+            mc = dict(mc) if isinstance(mc, dict) else {}
+            mc["provider"] = slug
+            mc["default"] = model
+            mc["base_url"] = ep.get("base_url", "")
+            cfg["model"] = mc
+            save_config(cfg)
+        except Exception as exc:
+            raise HTTPException(400, f"写入配置失败：{exc}")
+        return {**models_get_main(), "activation": "next_start"}
 
     # ---- embedding: pick {endpoint, model} → resolve creds → write ov.conf ----
     @router.get("/models/embedding")

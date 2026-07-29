@@ -4,8 +4,8 @@ import { moPortOf } from "../../store/slices/gatewaySlice";
 import {
   listEndpoints, addEndpoint, updateEndpoint, deleteEndpoint, detectEndpointModels,
   getEmbeddingConfig, setEmbeddingConfig, getEvolveModelConfig, setEvolveModelConfig,
-  getFinetuneConfig, setFinetuneConfig,
-  Endpoint, EmbeddingSel, EvolveSel, FinetuneConfig,
+  getFinetuneConfig, setFinetuneConfig, getMainModel, setMainModel,
+  Endpoint, EmbeddingSel, EvolveSel, FinetuneConfig, MainModelSel,
 } from "../../services/mo-api";
 
 /** 模型配置 — endpoint library (configure once) + per-use model selection. */
@@ -15,6 +15,7 @@ export function ModelConfigSettings() {
   const [emb, setEmb] = useState<EmbeddingSel | null>(null);
   const [evo, setEvo] = useState<EvolveSel | null>(null);
   const [ft, setFt] = useState<FinetuneConfig | null>(null);
+  const [main, setMain] = useState<MainModelSel | null>(null);
   const [saved, setSaved] = useState("");
   const [adding, setAdding] = useState(false);
   const [detecting, setDetecting] = useState("");
@@ -25,6 +26,7 @@ export function ModelConfigSettings() {
     getEmbeddingConfig(moPort).then(setEmb).catch(() => {});
     getEvolveModelConfig(moPort).then(setEvo).catch(() => {});
     getFinetuneConfig(moPort).then(setFt).catch(() => {});
+    getMainModel(moPort).then(setMain).catch(() => {});
   }, [moPort]);
   useEffect(() => { refresh(); }, [refresh]);
 
@@ -70,6 +72,33 @@ export function ModelConfigSettings() {
           }} />
         ) : (
           <button onClick={() => setAdding(true)} style={{ ...miniBtn, marginTop: 12, background: "var(--seal)", color: "oklch(98% 0.01 85)", border: "none" }}>＋ 添加端点</button>
+        )}
+      </Card>
+
+      {/* Main chat model — the one 小貘 actually talks with */}
+      <Card title="对话模型 · 小貘" sub="小貘用来跟你说话的模型(选端点+模型)">
+        {main && (
+          <>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+              <SelRow label="端点" value={main.endpoint_id} options={eps.map((e) => ({ v: e.id, t: e.name }))}
+                onChange={(v) => {
+                  const first = epModels(v)[0] ?? "";
+                  if (moPort && first) setMainModel(moPort, v, first).then(setMain).then(() => flash("已保存 · 下次启动生效"));
+                }} />
+              <SelRow label="模型" value={main.model} options={epModels(main.endpoint_id).map((m) => ({ v: m, t: m }))}
+                onChange={(v) => moPort && setMainModel(moPort, main.endpoint_id, v).then(setMain).then(() => flash("已保存 · 下次启动生效"))} />
+            </div>
+            {!main.endpoint_id && (
+              <Note>
+                当前模型 <b>{main.model || "(未设)"}</b> 来自 <code>{main.provider || "未知"}</code>,
+                不在端点库里 —— 在上面选一个端点就会切过来。
+              </Note>
+            )}
+            <Note>
+              端点库里的端点会同步成 Hermes 的 provider,所以在「灶台」里也能直接挑到。
+              换完模型要重启引擎才生效。
+            </Note>
+          </>
         )}
       </Card>
 
