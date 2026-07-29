@@ -42,6 +42,10 @@ echo "==> Creating Python venv at vendor/hermes-agent/.venv ($PY)…"
 echo "==> Installing self-evolution dependency (dspy)…"
 vendor/hermes-agent/.venv/bin/pip install "dspy>=3.2"
 
+# Dev only: `pytest server/tests` covers the evolution core (judge tiering,
+# acceptance gate, skill archive, safety scan). No test touches the network.
+vendor/hermes-agent/.venv/bin/pip install pytest >/dev/null
+
 cat <<'DONE'
 
 ==> Done.

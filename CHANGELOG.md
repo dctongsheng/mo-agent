@@ -6,6 +6,71 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — self-evolution trust layer
+
+- **Real fitness scoring.** The vendored engine shipped a complete `LLMJudge`,
+  imported it, and never instantiated it — every score in the product came from
+  a bag-of-words overlap heuristic while the UI and docs called it
+  "LLM-as-judge". New `server/mo_evolve/metric.py` wires the judge in with an
+  escalate-on-failure tier: the free heuristic runs first, and only candidates
+  scoring below 0.85 are judged. That is precisely where GEPA's reflective
+  mutation reads feedback, so the judge budget lands where it changes the
+  outcome, at roughly a third of an always-judge run's cost. Cached, hard-capped,
+  and failure-contained — a run whose judge failed >30% of calls is marked
+  `degraded` and the gate refuses it.
+- **Statistical acceptance gate** (`server/mo_evolve/gate.py`). A paired
+  bootstrap CI over the per-example holdout deltas, with a minimum effect size
+  and a minimum sample count. Replaces `improvement > 0`, which was printed to a
+  log and enforced nowhere — a candidate that regressed on holdout could be
+  deployed with one click.
+- **Regression pin sets.** Each accepted run donates its holdout to
+  `evolve/pins/<skill>.jsonl`; future candidates must not regress on the
+  accumulated pins. A ratchet against "improves this week's rubric, breaks last
+  month's", with no external benchmark.
+- **Versioned skill archive with revert** (`server/mo_evolve/skill_archive.py`).
+  Accepting used to be a bare `write_text` — no backup, no way back. Every
+  accept now snapshots first and writes atomically; the app lists versions with
+  one-click revert, and a revert is itself snapshotted.
+- **Diff-scoped safety scan** (`server/mo_evolve/safety.py`). Only lines the
+  rewrite *added* are scanned, so a skill that legitimately discusses `rm -rf`
+  or prompt injection stays evolvable. High-severity patterns block the run;
+  medium ones surface in the diff view.
+- **Frozen frontmatter.** A skill's `name`/`description` is injected into every
+  system prompt, while its body loads on demand — so frontmatter is the one
+  part with an unconditional blast radius. It survived evolution only by
+  accident of `reassemble_skill()`; now it's an enforced constraint.
+- **Test suite.** `pytest server/tests` — 129 tests, no network, no real
+  `~/.hermes-mo`. Includes a regression lock on the fix for upstream issue #141
+  (skill body as a signature instruction rather than an inert attribute), which
+  is what makes evolution a real mutation instead of a no-op. New CI job.
+
+### Fixed
+
+- **Stale-baseline clobber.** Accepting a run never compared the live
+  `SKILL.md` against the run's baseline, so a nightly run started at 03:00 and
+  accepted at 18:00 silently discarded every edit made in between. Now refused
+  (409) unless explicitly forced — and forced or not, the overwritten text is
+  archived.
+- **Hot-swapping evolved skills into live sessions.** Writing a skill
+  mid-conversation busts the prompt static-prefix cache and makes the next
+  `skill_view` return text the turn wasn't planned against. Accepts are now
+  marked pending and the UI reports 「下次新会话生效」.
+
+### Changed
+
+- Evolution state (runs, schedule, skill listing, auto-rotation) moved out of
+  the `mo-gateway.py` closure into `server/mo_evolve/store.py`. The gateway file
+  has a hyphen in its name and so cannot be imported — that, not oversight, was
+  the root cause of having no tests. Route handlers now delegate.
+- The diff modal shows the gate verdict, how the scores were produced
+  (`metric_mode`, judge call counts, cache hits), and a collusion warning when
+  the judge and optimizer models are identical. A failing gate turns 采纳 into a
+  two-step force-confirm rather than hiding the candidate.
+- `docs/self-evolution.md` rewritten. It previously claimed LLM-as-judge scoring
+  (untrue until now) and that evolution ran against a private copy of the skills
+  (it has always run against the live directory). Both corrected, and a
+  "What 夜貘 cannot do yet" section added.
+
 ### Added
 - Initial public release of **Mo**, a desktop self-evolving agent.
 - Electron + React 19 desktop app (`app/`) with chat, settings, model

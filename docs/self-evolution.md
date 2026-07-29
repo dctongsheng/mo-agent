@@ -1,33 +1,68 @@
 # Self-evolution
 
-Mo's defining feature: it rewrites its own skills to get better at them, and only keeps a rewrite if it provably improves.
+Mo's defining feature: it rewrites its own skills to get better at them, and only deploys a rewrite that provably improves.
 
 A **skill** is a Markdown file (`SKILL.md`) with YAML frontmatter that teaches the agent how to do something well — for example, pitfalls to avoid when scraping a paginated API. Over time, a hand-written skill is rarely optimal. Self-evolution closes that gap automatically.
+
+Two agents share the work. **小貘** (the `default` profile) does your tasks. **夜貘** (`ye-mao-evolve`) polishes the skills 小貘 uses. Today 夜貘 is a scheduled optimizer, not an agent with its own reasoning — see [What 夜貘 cannot do yet](#what-夜貘-cannot-do-yet).
 
 ## The loop
 
 ```mermaid
 flowchart TD
-    A[Pick a skill] --> B[Generate a synthetic eval set]
+    A[Pick a skill] --> B[Build an eval set]
     B --> C[GEPA optimization:<br/>reflect → rewrite → score]
-    C --> D{Beats baseline?}
-    D -- no --> C
-    D -- yes --> E[Validate hard constraints]
-    E -- fail --> X[Reject · save FAILED variant]
-    E -- pass --> F[Deploy: write back to SKILL.md]
+    C --> D[Validate hard constraints<br/>size · growth · structure · safety]
+    D -- fail --> X[Reject · save FAILED variant]
+    D -- pass --> E[Score holdout with the LLM judge<br/>baseline vs. evolved, same examples]
+    E --> F[Check the regression pin set]
+    F --> G{Acceptance gate:<br/>paired bootstrap CI}
+    G -- pass --> H[Armed: 采纳]
+    G -- fail --> I[Requires an explicit<br/>force-confirm]
+    H --> J[Snapshot → atomic write → pin the holdout]
+    I --> J
+    J --> K[Active next session · revertible]
 ```
 
-1. **Pick a skill.** On a schedule, Mo rotates through your non–built-in skills in name order, evolving one per run so every custom skill gets attention in turn. You can also trigger a specific skill on demand.
-2. **Generate an eval set.** A judge model produces a small synthetic dataset of tasks the skill should handle.
-3. **Optimize (GEPA).** A reflective optimizer proposes rewrites of the skill, scores each against the eval set with an LLM-as-judge, and keeps Pareto-improving candidates over several iterations.
+1. **Pick a skill.** On a schedule, Mo rotates through your non–built-in skills in name order, evolving one per run. You can also trigger a specific skill on demand.
+2. **Build an eval set.** A judge model produces a small synthetic dataset of tasks the skill should handle. (Mining your actual trajectories is on the roadmap — see below.)
+3. **Optimize (GEPA).** A reflective optimizer proposes rewrites of the skill body and scores each one. The skill body *is* the optimizable parameter: it lives in the DSPy signature's `instructions`, which is what GEPA and MIPROv2 mutate.
 4. **Validate constraints.** The winning candidate must pass every hard constraint (below) or it is rejected and saved as `evolved_FAILED.md` for inspection.
-5. **Deploy.** A passing variant is written back to the live `SKILL.md`.
+5. **Score the holdout.** Baseline and evolved are scored on the *same* held-out examples, always by the LLM judge — never by the cheap heuristic.
+6. **Gate.** A paired bootstrap decides whether the improvement is real (below).
+7. **Apply.** Accepting snapshots the current file first, writes atomically, and donates the holdout to the skill's regression pin set. Nothing auto-deploys — a human always presses the button.
 
 Each run is a subprocess; its full log and result are visible in the app (`/api/mo/evolve/runs/{id}/log`).
 
+## Scoring: a tiered LLM judge
+
+The naive approach is to score every candidate with an LLM. That's accurate and expensive — a nightly loop with an unbounded judge is a real bill. The cheap approach is a keyword-overlap heuristic, which is free and tells you almost nothing.
+
+Mo escalates **on failure, not on success**:
+
+```
+heuristic = 0.3 + 0.7 × |expected ∩ output| / |expected|
+
+heuristic ≥ 0.85  →  return it, no LLM call
+heuristic <  0.85  →  LLM judge: correctness / procedure-following / conciseness
+                       + textual feedback
+```
+
+The reason this works is specific to GEPA: its reflective mutation only *reads* the feedback attached to candidates it wants to improve — the low scorers. Judging a candidate that already scored 0.9 buys nothing. So essentially the whole judge budget lands on the examples GEPA actually learns from, at roughly a third of an always-judge run's cost.
+
+Guards, all in `server/mo_evolve/metric.py`:
+
+- **Cache** keyed on `sha256(task_input ‖ output ‖ skill_text)`. GEPA re-evaluates the same candidate on the same valset repeatedly, so the hit rate is high.
+- **Hard call cap** (default 4× the metric budget) on *search* scoring; past it, scoring degrades to the heuristic and `capped` is recorded. Holdout scoring deliberately ignores the cap — it's a handful of examples and it's the only thing the gate reads.
+- **Failure containment**: a judge exception falls back to the heuristic. If more than 30% of judge calls fail, the run is marked `degraded` and **the gate refuses it** — a run scored by a broken judge must never be one click from deployment.
+- **Scale purity on the holdout.** The gate subtracts baseline from evolved *per example*. A keyword-overlap score on one side of that subtraction and a judged score on the other manufactures a delta out of nothing (a heuristic 1.0 against a judged 0.9 reads as +0.10 on identical text). So a single holdout fallback sets `holdout_fallbacks` and marks the run degraded, even at n=1.
+- **Collusion warning**: if the judge model equals the optimizer model, `collusion_risk` is set and the UI says so. The same model has the same blind spots on both sides of the desk.
+
+The run's `metrics.json` records `metric_mode`, judge call counts, cache hits, and per-dimension holdout scores, so a "+0.083" in the UI can always be traced to how it was produced.
+
 ## Constraints
 
-A candidate is only deployable if **all** of these pass (`server/vendor/evolution/core/constraints.py`):
+A candidate is only deployable if **all** of these pass:
 
 | Constraint | Rule |
 |------------|------|
@@ -35,13 +70,89 @@ A candidate is only deployable if **all** of these pass (`server/vendor/evolutio
 | `growth_limit` | Doesn't grow more than `max_prompt_growth` (default +20%) over the baseline. **Baseline-aware**: small skills get an absolute grace of `small_skill_grace_size` (default 8 KB), because +20% of a 2 KB skill is too little room for a meaningful rewrite. |
 | `non_empty` | The result is non-empty. |
 | `skill_structure` | Valid YAML frontmatter with `name` and `description`. |
+| `injection_scan` | No high-severity pattern in the lines this rewrite **added**. |
+| `frontmatter_frozen` | The YAML frontmatter is byte-identical to the baseline. |
 
 The two baseline-aware rules matter: a flat percentage cap strangles small skills (they can't grow enough to improve) while a flat absolute cap wrongly rejects large ones. Tying both to the baseline lets a tiny skill be substantially reworked **and** keeps a large skill from ballooning.
 
+### Why the safety scan is diff-scoped
+
+Evolved text is written by a model into a file the agent later loads. But scanning the whole file would make a skill *about* shell scripting or prompt injection permanently un-evolvable — it legitimately contains `rm -rf` and "ignore previous instructions". What's suspicious is text the optimizer **introduced**, so only added lines are scanned (`server/mo_evolve/safety.py`).
+
+High severity blocks the run: instruction-override phrasing, identity override, system-prompt exfiltration, chat-template tokens (`<|im_start|>`), `curl … | sh`, `rm -rf /`, and credential shapes. Medium severity warns in the diff view: newly-introduced external URLs, long base64 blobs, absolute paths outside `$HOME`.
+
+Both severities are rendered in the diff modal. A run blocked by a high-severity finding writes `evolved_FAILED.md` plus `failed_constraints.json` next to it — a run rejected *for* an injection finding is exactly the one whose findings someone needs to read.
+
+### Why frontmatter is frozen
+
+`vendor/hermes-agent/agent/system_prompt.py` builds the always-on skills index from frontmatter `name` + `description` only; bodies load on demand via `skill_view`. Frontmatter is therefore the one part of a skill that lands in **every** system prompt unconditionally.
+
+It survives evolution today because `reassemble_skill()` happens to preserve it — an accident of implementation. `frontmatter_frozen` turns that into an enforced invariant. Rewriting the body is the point of evolution; rewriting the always-on index is a much larger blast radius, and if we ever want it, it should be a separate, explicitly-gated feature.
+
+## The acceptance gate
+
+`improvement > 0` is not evidence. On a handful of holdout examples, one lucky sample moves the mean; a greedy "keep it if the score went up" loop is the agent p-hacking itself.
+
+A candidate arms the accept button only if **all** hold (`server/mo_evolve/gate.py`):
+
+| Check | Rule |
+|---|---|
+| Sample size | `n ≥ min_holdout` (default 5) |
+| Effect | The 95% **paired bootstrap** CI lower bound on the mean holdout delta exceeds `min_effect` (default 0.02) |
+| Regression | No pin regresses by more than `regression_tolerance` (default 2%) |
+| Judge health | The run is not `degraded` — no widespread judge failures, and no holdout score fell back to the heuristic scale |
+
+Paired, because the pipeline scores both variants on the *same* holdout examples — resampling over pairs preserves that correlation and has far more power at n≈5–10 than an unpaired test. The bootstrap is seeded, so a verdict is reproducible from the stored scores.
+
+A failing gate does **not** hide the candidate. It turns 采纳 into a two-step force-confirm: you can still deploy a regression, but never by a single stray click, and the run records `forced: true`.
+
+### Regression pins: benchmarks as gates, not fitness functions
+
+Every accepted run donates its holdout examples to `evolve/pins/<skill>.jsonl`. Future candidates for that skill are re-scored against the accumulated pins and may not regress on them.
+
+This is a ratchet: a rewrite that improves this week's rubric while breaking something last month's rewrite got right is rejected. It needs no external benchmark and no new infrastructure — the pins are just the evidence from runs you already approved. Capped at 50 examples, oldest evicted.
+
+## Applying, reverting, and the no-hot-swap rule
+
+Accepting a run:
+
+1. **Staleness check.** If the live `SKILL.md` no longer matches the run's `baseline_skill.md`, the accept is refused. A nightly run started at 03:00 and accepted at 18:00 would otherwise silently discard every hand edit made in between.
+2. **Gate check.** Refused unless passing, or forced.
+3. **Snapshot.** The current contents are archived as `vNNNN.md` before anything is overwritten.
+4. **Atomic write.** Temp file + `os.replace`. A torn `SKILL.md` is worse than a stale one — a half-written frontmatter block breaks skill discovery entirely.
+5. **Pin the holdout.**
+6. **Mark pending.**
+
+Every version is listed in the app with a one-click revert, and a revert is itself snapshotted first, so revert-of-revert works.
+
+**No hot-swap.** An in-flight session has already built its prompt prefix; `system_prompt.py` notes that changing a stable-tier input mid-session busts the static-prefix rebuild and drops the request to an uncached layout. The next `skill_view` in that conversation would also return text the turn wasn't planned against. So the UI reports 「下次新会话生效」 rather than implying the running conversation just changed underneath you.
+
+## What 夜貘 cannot do yet
+
+Being straight about the current limits, because the UI's poetry is easy to over-read:
+
+- **夜貘 does not read your trajectories.** `~/.hermes-mo/trajectories/trajectories.jsonl` and your 好评/差评 labels are collected but feed nothing. The eval set is synthesized from the skill's own text, which makes the loop self-referential: the skill is optimized against a model's imagination of what it should do, not against what you actually asked for. Mining trajectories — especially negative ones, which are the highest-value signal for GEPA's reflection — is the next planned step.
+- **夜貘 does not choose what to work on.** Scheduled selection is alphabetical round-robin. There is no reflection step in which it reasons about *which* skill is failing you and *why*.
+- **夜貘 cannot author, split, or retire a skill.** It can only rewrite the body of one that already exists.
+- **Its `SOUL.md` is not yet load-bearing.** The identity file in the evolver profile is written once and read by nothing that runs.
+
 ## Configuration
 
-The optimizer and judge models are chosen via the endpoint library (`/api/mo/models/evolve`) and stored in `~/.hermes-mo/mo-config/evolve.json`. Tune iteration count, dataset size, and constraint thresholds in `server/vendor/evolution/core/config.py` (`EvolutionConfig`).
+Optimizer and judge models are chosen via the endpoint library (`/api/mo/models/evolve`) and stored in `~/.hermes-mo/mo-config/evolve.json`. Tune iteration count, dataset size, judge tiering, and gate thresholds in `server/vendor/evolution/core/config.py` (`EvolutionConfig`).
+
+## Where the code lives
+
+| Path | Contents |
+|---|---|
+| `server/mo_evolve/` | Mo-original: `store` (run state), `metric` (tiered judge), `gate` (bootstrap + pins), `safety` (scan), `skill_archive` (versions + revert), `accept` (guarded apply). Importable and unit-tested. |
+| `server/vendor/evolution/` | The GEPA engine, vendored from NousResearch/hermes-agent-self-evolution (MIT) with Mo's local patches — see `server/vendor/README.md`. |
+| `server/tests/` | `pytest server/tests`. No test touches the network or a real `~/.hermes-mo`. |
+| `server/mo-gateway.py` | Route handlers only; they delegate to `mo_evolve`. |
+
+Upstream's phase 4 (evolving tool *implementation code* via the Darwinian Evolver) is deliberately **not** implemented: that tool is AGPL v3, and Mo neither imports, vendors, nor ports it.
 
 ## Why a dedicated profile
 
-Evolution runs under a separate "evolver" profile (`~/.hermes-mo/profiles/…`) with its own seeded copy of the skills, so an in-progress optimization never interferes with the agent you're actively chatting with. Accepted variants are written back to your real skills directory.
+Run bookkeeping — history, schedule, archive, pins — lives under a separate "evolver" profile (`~/.hermes-mo/profiles/ye-mao-evolve/`), so it never mixes with your chat sessions.
+
+Note that evolution reads and writes your **live** skills directory (`~/.hermes-mo/skills`), not a copy. That's deliberate: a skill you authored five minutes ago is immediately evolvable, and accepting writes back to the file you own. Isolation comes from the staging → review → accept flow, not from a separate skills tree: a candidate sits in the run's output directory until you approve it.

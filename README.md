@@ -39,6 +39,7 @@ flowchart LR
     end
     subgraph Server["server/ — Python gateway"]
         GW["mo-gateway.py<br/>/api/mo/* routes"]
+        MOE["mo_evolve/<br/>judge · gate · archive · safety"]
         EVO["vendor/evolution<br/>GEPA self-evolution engine"]
     end
     subgraph Core["vendor/hermes-agent — Hermes core (Nous Research, MIT)"]
@@ -50,13 +51,15 @@ flowchart LR
     UI -- "HTTP (localhost, token auth)" --> GW
     GW --> DASH
     GW -- "spawns" --> EVO
-    EVO -- "rewrites skills" --> AG
+    GW --> MOE
+    EVO --> MOE
+    MOE -- "gated rewrite,<br/>next session" --> AG
     DASH --> AG
     AG --> MEM
 ```
 
 - **`app/`** — the desktop application. Its own React UI; talks to the gateway over localhost with a per-boot token.
-- **`server/`** — the Python gateway (`mo-gateway.py`) that mounts Mo's `/api/mo/*` routes onto the Hermes web server, plus the self-evolution engine under `server/vendor/evolution/`.
+- **`server/`** — the Python gateway (`mo-gateway.py`) that mounts Mo's `/api/mo/*` routes onto the Hermes web server; Mo's own self-evolution logic in `server/mo_evolve/` (tiered LLM judge, acceptance gate, versioned skill archive, safety scan) covered by `server/tests/`; and the vendored GEPA engine under `server/vendor/evolution/`.
 - **`vendor/hermes-agent/`** — the vendored Hermes Agent core (Nous Research, MIT). See [Licensing](#licensing).
 
 See [docs/architecture.md](docs/architecture.md) and [docs/self-evolution.md](docs/self-evolution.md) for details.
@@ -104,9 +107,10 @@ Known limitations, so you can judge fit before installing:
 | **Platform** | macOS / Apple Silicon only. No Windows or Linux build. |
 | **UI language** | Chinese only. |
 | **Fine-tuning** | Scaffold only — no cloud-training scripts bundled. |
-| **Tests** | No automated test suite yet; CI covers typecheck, build, engine import and license compliance. |
+| **Tests** | The self-evolution core (`server/mo_evolve/`) is covered by `pytest server/tests` — 129 tests, no network. The gateway's routes, the Electron main process and the UI have no automated coverage; CI additionally runs typecheck, build, engine import and license compliance. |
 | **Network** | The UI loads three webfonts from Google Fonts at launch. Your chats, memory and trajectories never leave your machine, but this one request does — self-host the fonts in `index.html` if you need a fully offline app. |
-| **Self-evolution** | Rewrites skill files on disk. Candidates are constraint-checked, but a prompt-injected model can still influence skill text — see [SECURITY.md](SECURITY.md). |
+| **Self-evolution** | Rewrites skill files on disk. Candidates pass hard constraints, a diff-scoped injection scan and a statistical acceptance gate, and every accept is snapshotted and revertible — but a prompt-injected model can still influence skill text, so review the diff. See [SECURITY.md](SECURITY.md). |
+| **夜貘's autonomy** | It optimizes skills; it does not yet *reason* about which one to work on. Selection is alphabetical round-robin, your trajectories and 好评/差评 labels feed nothing yet, and it can't author or retire a skill. See [docs/self-evolution.md](docs/self-evolution.md#what-夜貘-cannot-do-yet). |
 
 ## Security
 
