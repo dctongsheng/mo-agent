@@ -28,6 +28,11 @@ Local patches (see git history):
   a *paired* test; evaluates the regression pin set; runs the diff-scoped
   safety scan as two extra constraints; writes `gate.json` / `safety.json` and
   a `fitness` block into `metrics.json`
+- `core/config.py`: `critic_model` — the cross-model reviewer. Empty disables
+  the review rather than running a same-model rubber stamp
+- `skills/evolve_skill.py`: `--critic-model` flag and a post-optimization
+  critique written to `critic.json`; `trajectory` / `mixed` eval sources that
+  mine Mo's own chat log; dataset provenance recorded in `metrics.json`
 
 Every `mo_evolve` import in this tree is guarded:
 

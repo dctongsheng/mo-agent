@@ -5,7 +5,9 @@ Usage:
     python -m evolution.skills.evolve_skill --skill arxiv --eval-source golden --dataset datasets/skills/arxiv/
 """
 
+import difflib
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -50,6 +52,10 @@ try:
     from mo_evolve.trajectory_dataset import build_dataset_from_trajectories as _build_from_trajectories
 except ImportError:  # pragma: no cover
     _build_from_trajectories = None
+try:
+    from mo_evolve import critic as _critic
+except ImportError:  # pragma: no cover
+    _critic = None
 
 console = Console()
 
@@ -61,6 +67,7 @@ def evolve(
     dataset_path: Optional[str] = None,
     optimizer_model: str = "openai/gpt-4.1",
     eval_model: str = "openai/gpt-4.1-mini",
+    critic_model: str = "",
     hermes_repo: Optional[str] = None,
     run_tests: bool = False,
     dry_run: bool = False,
@@ -72,6 +79,7 @@ def evolve(
         optimizer_model=optimizer_model,
         eval_model=eval_model,
         judge_model=eval_model,  # Use same model for dataset generation
+        critic_model=critic_model,
         run_pytest=run_tests,
     )
     if hermes_repo:
@@ -518,6 +526,28 @@ def evolve(
             {"findings": [f.to_dict() for f in safety_findings]},
             ensure_ascii=False, indent=2))
 
+    # Mo local patch: a second opinion, from a model that is not the author.
+    # One call, advisory — a `reject` doesn't block, it just means accepting
+    # needs the same explicit confirmation as a failed gate.
+    if _critic is not None and getattr(config, "critic_model", ""):
+        console.print("\n[bold]Cross-model review[/bold]")
+        diff_text = "".join(difflib.unified_diff(
+            skill["raw"].splitlines(keepends=True),
+            evolved_full.splitlines(keepends=True),
+            fromfile="baseline", tofile="evolved"))
+        crit = _critic.critique(
+            diff=diff_text, baseline=skill["body"], evolved=evolved_body,
+            hypothesis=os.environ.get("MO_EVOLVE_HYPOTHESIS", ""),
+            critic_model=config.critic_model, optimizer_model=optimizer_model,
+        )
+        console.print(f"  {crit.verdict}" + (f" — {crit.rationale}" if crit.rationale else ""))
+        if crit.skipped:
+            console.print(f"  [yellow]{crit.skipped}[/yellow]")
+        (output_dir / "critic.json").write_text(
+            json.dumps(crit.to_dict(), ensure_ascii=False, indent=2))
+        metrics["critic"] = crit.to_dict()
+        (output_dir / "metrics.json").write_text(json.dumps(metrics, indent=2))
+
     if verdict is not None:
         metrics["gate"] = verdict.to_dict()
         (output_dir / "metrics.json").write_text(json.dumps(metrics, indent=2))
@@ -550,10 +580,11 @@ def evolve(
 @click.option("--dataset-path", default=None, help="Path to existing eval dataset (JSONL)")
 @click.option("--optimizer-model", default="openai/gpt-4.1", help="Model for GEPA reflections")
 @click.option("--eval-model", default="openai/gpt-4.1-mini", help="Model for evaluations")
+@click.option("--critic-model", default="", help="Model for the cross-model review (must differ from --optimizer-model)")
 @click.option("--hermes-repo", default=None, help="Path to hermes-agent repo")
 @click.option("--run-tests", is_flag=True, help="Run full pytest suite as constraint gate")
 @click.option("--dry-run", is_flag=True, help="Validate setup without running optimization")
-def main(skill, iterations, eval_source, dataset_path, optimizer_model, eval_model, hermes_repo, run_tests, dry_run):
+def main(skill, iterations, eval_source, dataset_path, optimizer_model, eval_model, critic_model, hermes_repo, run_tests, dry_run):
     """Evolve a Hermes Agent skill using DSPy + GEPA optimization."""
     evolve(
         skill_name=skill,
@@ -562,6 +593,7 @@ def main(skill, iterations, eval_source, dataset_path, optimizer_model, eval_mod
         dataset_path=dataset_path,
         optimizer_model=optimizer_model,
         eval_model=eval_model,
+        critic_model=critic_model,
         hermes_repo=hermes_repo,
         run_tests=run_tests,
         dry_run=dry_run,

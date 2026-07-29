@@ -7,8 +7,9 @@ import { ModelEvolve } from "./ModelEvolve";
 import {
   getEvolveStatus, listEvolveSkills, runEvolve, listEvolveRuns, getEvolveRun,
   acceptEvolveRun, rejectEvolveRun, getEvolveSchedule, setEvolveSchedule, getEvolveRunLog,
-  listSkillVersions, revertSkill,
+  listSkillVersions, revertSkill, getCalibration, reflectNow,
   EvolveStatus, EvolveSkill, EvolveRun, EvolveRunDetail, EvolveSchedule, SkillVersion, EvalSource,
+  Calibration,
 } from "../../services/mo-api";
 
 function fmt(ts?: number): string {
@@ -61,6 +62,11 @@ export function HarnessEvolve() {
   const [refusal, setRefusal] = useState<string | null>(null);
   const [versions, setVersions] = useState<SkillVersion[]>([]);
   const [notice, setNotice] = useState<string | null>(null);
+  const [cal, setCal] = useState<Calibration | null>(null);
+  const [thinking, setThinking] = useState(false);
+  // 夜貘's pending pick. Held so the run it justified can carry its prediction —
+  // otherwise the prediction is saved, never attached, and never scored.
+  const [pendingPlan, setPendingPlan] = useState<{ id: string; skill: string } | null>(null);
 
   // Built-in Hermes skills are hidden by default; flip the toggle to evolve them.
   const visibleSkills = includeBuiltin ? skills : skills.filter((s) => !s.builtin);
@@ -72,6 +78,7 @@ export function HarnessEvolve() {
     listEvolveSkills(moPort).then((r) => setSkills(r.data)).catch(() => {});
     listEvolveRuns(moPort).then((r) => setRuns(r.data)).catch(() => {});
     getEvolveSchedule(moPort).then(setSched).catch(() => {});
+    getCalibration(moPort).then(setCal).catch(() => {});
   }, [moPort]);
 
   useEffect(() => { refresh(); }, [refresh]);
@@ -96,8 +103,11 @@ export function HarnessEvolve() {
   const start = () => {
     if (!moPort || !skill || busy) return;
     setBusy(true);
-    runEvolve(moPort, skill, iterations, evalSource).then((r) => {
+    // Only carry the plan if the user kept 夜貘's pick.
+    const planId = pendingPlan?.skill === skill ? pendingPlan.id : undefined;
+    runEvolve(moPort, skill, iterations, evalSource, planId).then((r) => {
       if (!r.ok) alert(`进化引擎未就绪：${r.reason ?? "未知原因"}`);
+      setPendingPlan(null);
       setTimeout(refresh, 500);
     }).catch(() => {}).finally(() => setBusy(false));
   };
@@ -165,6 +175,22 @@ export function HarnessEvolve() {
     }).catch(() => setNotice("回退失败"));
   };
 
+  // 「让夜貘现在想一想」 — reflection on demand. Abstaining is reported, not
+  // hidden: "no evidence to act on" is a legitimate answer and the alternative
+  // is inventing a target.
+  const think = () => {
+    if (!moPort || thinking) return;
+    setThinking(true);
+    reflectNow(moPort).then((r) => {
+      if (!r.ok) { setNotice(`夜貘没能想下去：${r.reason ?? "未知原因"}`); return; }
+      if (r.abstained) { setNotice(r.reason ?? "夜貘这次弃权了。"); return; }
+      const p = r.data!;
+      setSkill(p.skill);
+      setPendingPlan({ id: p.id, skill: p.skill });
+      setNotice(`夜貘选了「${p.skill}」：${p.why}`);
+    }).catch(() => setNotice("反思失败")).finally(() => setThinking(false));
+  };
+
   const saveSched = (patch: Partial<EvolveSchedule>) => {
     if (!moPort || !sched) return;
     const next = { ...sched, ...patch };
@@ -224,6 +250,11 @@ export function HarnessEvolve() {
               color: "oklch(98% 0.01 85)", fontSize: 14, fontWeight: 600,
               cursor: (busy || !status?.ready) ? "default" : "pointer", fontFamily: "'Noto Serif SC', serif",
             }}>{busy ? "启动中…" : "立即进化一次 →"}</button>
+            <button onClick={think} disabled={thinking || !(status?.ready)} style={{
+              height: 34, borderRadius: 9, border: "1px solid var(--line-2)",
+              background: "transparent", color: "var(--ink-2)", fontSize: 12.5,
+              cursor: (thinking || !status?.ready) ? "default" : "pointer",
+            }}>{thinking ? "夜貘在想…" : "让夜貘自己挑一条"}</button>
             <div style={{ fontSize: 11, color: "var(--ink-3)", lineHeight: 1.6 }}>
               评测走 {status?.eval_model ?? "qwen"};迭代越多越慢越准。一次约数分钟。
             </div>
@@ -258,6 +289,12 @@ export function HarnessEvolve() {
                     <option key={k} value={k}>{SOURCE_LABEL[k]}</option>
                   ))}
                 </select>
+                <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12,
+                                color: "var(--ink-2)", cursor: "pointer", marginTop: 8 }}>
+                  <input type="checkbox" checked={sched.reflect ?? true}
+                         onChange={(e) => saveSched({ reflect: e.target.checked })} />
+                  让夜貘自己挑目标（关掉则按字母轮转）
+                </label>
                 <div style={{ fontSize: 11, color: "var(--ink-3)", marginTop: 5, lineHeight: 1.6 }}>
                   夜里正是真实轨迹最派得上用场的时候——白天攒下的差评,晚上拿来打磨。
                 </div>
@@ -278,7 +315,16 @@ export function HarnessEvolve() {
                 cursor: r.status === "running" ? "default" : "pointer", background: "var(--card)",
               }}>
                 <span style={{ width: 7, height: 7, borderRadius: 99, background: STATUS_COLOR[r.status], flexShrink: 0, ...(r.status === "running" ? { animation: "breathe 1.4s ease-in-out infinite" } : {}) }} />
-                <span style={{ flex: 1, fontSize: 13, fontFamily: "'JetBrains Mono', monospace", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{r.skill}</span>
+                <span style={{ flex: 1, minWidth: 0 }}>
+                  <span style={{ fontSize: 13, fontFamily: "'JetBrains Mono', monospace", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", display: "block" }}>{r.skill}</span>
+                  {/* Why this skill, in 夜貘's own words. A run that can say why
+                      it happened is a different object than one that can't. */}
+                  {r.why && (
+                    <span style={{ fontSize: 11, color: "var(--ink-3)", lineHeight: 1.5,
+                                   display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical",
+                                   overflow: "hidden" }}>{r.why}</span>
+                  )}
+                </span>
                 <span style={{ fontSize: 11, color: STATUS_COLOR[r.status] }}>{STATUS_LABEL[r.status]}</span>
                 <button
                   onClick={(e) => { e.stopPropagation(); openLog(r); }}
@@ -288,6 +334,33 @@ export function HarnessEvolve() {
               </div>
             ))}
           </div>
+
+          {/* 夜貘's track record. The point of showing this is that it can go
+              DOWN — a hit rate near chance means the "reasoning" is decoration,
+              and that is exactly what you'd want to know. */}
+          {cal && (cal.total > 0 || (cal.unverifiable ?? 0) > 0) && (
+            <div style={{ borderTop: "1px dashed var(--line)", marginTop: 18, paddingTop: 14 }}>
+              <div style={{ fontSize: 13.5, fontWeight: 600, marginBottom: 6 }}>夜貘的判断</div>
+              {cal.total > 0 ? (
+                <div style={{ fontSize: 12.5, color: "var(--ink-2)", lineHeight: 1.7 }}>
+                  它事先说会怎么变,事后按 holdout 上的分数核对：
+                  <span style={{ fontFamily: "'JetBrains Mono', monospace", marginLeft: 4,
+                                 color: (cal.accuracy ?? 0) >= 0.6 ? "var(--moss)" : "var(--moon)" }}>
+                    {cal.verified}/{cal.total}
+                    {cal.accuracy != null && ` · ${Math.round(cal.accuracy * 100)}%`}
+                  </span>
+                </div>
+              ) : (
+                <div style={{ fontSize: 12.5, color: "var(--ink-3)" }}>还没有可核验的预测。</div>
+              )}
+              {!!cal.unverifiable && (
+                <div style={{ fontSize: 11, color: "var(--ink-3)", marginTop: 4, lineHeight: 1.6 }}>
+                  另有 {cal.unverifiable} 次无法核验（没给出可检验的指标,或那次运行没产出分数）——
+                  不计入正确率,但说不清预期本身也是一种信息。
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Versions & revert. Accepting used to be a one-way door: a bare
               write_text with no backup. Every accept now snapshots first, so
@@ -373,6 +446,59 @@ export function HarnessEvolve() {
                       在 {openRun.gate.pin_regressions.length} 条历史钉集样本上回归。
                     </div>
                   )}
+                </div>
+              )}
+
+              {/* 夜貘's stated reasoning, and whether it held up. The
+                  prediction was committed to before the run, and checked
+                  against numbers the run didn't choose. */}
+              {openRun.plan && (
+                <div style={{ marginBottom: 14, padding: "10px 14px", borderRadius: 9, fontSize: 12.5,
+                              border: "1px solid var(--line-2)", lineHeight: 1.6 }}>
+                  <div style={{ fontWeight: 600 }}>夜貘为什么挑了它</div>
+                  <div style={{ color: "var(--ink-2)", marginTop: 3 }}>{openRun.plan.why}</div>
+                  {openRun.plan.hypothesis && (
+                    <div style={{ color: "var(--ink-3)", marginTop: 3 }}>
+                      猜测：{openRun.plan.hypothesis}
+                    </div>
+                  )}
+                  {openRun.plan.prediction?.statement && (
+                    <div style={{ marginTop: 5,
+                                  color: openRun.plan.prediction.verified === true ? "var(--moss)"
+                                       : openRun.plan.prediction.verified === false ? "var(--seal)"
+                                       : "var(--ink-3)" }}>
+                      预言：{openRun.plan.prediction.statement}
+                      {" · "}
+                      {openRun.plan.prediction.verified === true ? "应验了"
+                        : openRun.plan.prediction.verified === false ? "没应验"
+                        : "无法核验"}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* A second opinion from a model that is not the author. */}
+              {openRun.critic && !openRun.critic.skipped && (
+                <div style={{ marginBottom: 14, padding: "10px 14px", borderRadius: 9, fontSize: 12.5,
+                              lineHeight: 1.6,
+                              border: `1px solid ${openRun.critic.downgrades ? "var(--seal)" : "var(--line-2)"}` }}>
+                  <div style={{ fontWeight: 600,
+                                color: openRun.critic.downgrades ? "var(--seal)" : "var(--ink-1)" }}>
+                    另一个模型的审查 · {openRun.critic.verdict === "reject" ? "不建议采纳"
+                      : openRun.critic.verdict === "revise" ? "建议再改" : "认可"}
+                  </div>
+                  {openRun.critic.rationale && (
+                    <div style={{ color: "var(--ink-2)", marginTop: 3 }}>{openRun.critic.rationale}</div>
+                  )}
+                  {openRun.critic.risks?.map((r, i) => (
+                    <div key={i} style={{ color: "var(--ink-3)", marginTop: 2 }}>· {r}</div>
+                  ))}
+                </div>
+              )}
+              {openRun.critic?.collusion && (
+                <div style={{ marginBottom: 14, fontSize: 11.5, color: "var(--moon)", lineHeight: 1.6 }}>
+                  ⚠ 审查模型与优化模型相同,这次没有做交叉审查——同一个模型有同样的盲点,
+                  它审自己的改写只会盖章。在「设置 · 模型配置」里换一个审查模型。
                 </div>
               )}
 
@@ -517,10 +643,15 @@ export function HarnessEvolve() {
               {openRun.status === "done" && (
                 <div style={{ marginLeft: "auto", display: "flex", gap: 12 }}>
                   <button onClick={() => reject(openRun.id)} style={{ height: 38, padding: "0 18px", borderRadius: 9, border: "1px solid var(--line-2)", background: "transparent", color: "var(--ink-2)", fontSize: 13, cursor: "pointer" }}>弃用</button>
-                  {refusal ? (
-                    // Second step: the backend already said no once. Deploying
-                    // anyway stays possible — it just can't happen by accident.
-                    <button onClick={() => accept(openRun.id, true)} style={{ height: 38, padding: "0 20px", borderRadius: 9, border: "1px solid var(--seal)", background: "transparent", color: "var(--seal)", fontSize: 13.5, fontWeight: 600, cursor: "pointer", fontFamily: "'Noto Serif SC', serif" }}>确认强制采纳</button>
+                  {/* The gate says "the numbers don't support this". The critic
+                      says "the numbers might, and it's still a bad idea". Both
+                      cost the same extra click. */}
+                  {(refusal || openRun.critic?.downgrades) ? (
+                    // Second step. `force` only when the backend actually
+                    // refused — a critic objection must not skip the gate,
+                    // so a critic-flagged run still gets checked, and if the
+                    // gate also fails the user confirms once more.
+                    <button onClick={() => accept(openRun.id, !!refusal)} style={{ height: 38, padding: "0 20px", borderRadius: 9, border: "1px solid var(--seal)", background: "transparent", color: "var(--seal)", fontSize: 13.5, fontWeight: 600, cursor: "pointer", fontFamily: "'Noto Serif SC', serif" }}>{refusal ? "确认强制采纳" : "仍要采纳"}</button>
                   ) : (
                     <button onClick={() => accept(openRun.id)} style={{ height: 38, padding: "0 20px", borderRadius: 9, border: "none", background: "var(--seal)", color: "oklch(98% 0.01 85)", fontSize: 13.5, fontWeight: 600, cursor: "pointer", fontFamily: "'Noto Serif SC', serif" }}>采纳 · 写回技艺</button>
                   )}

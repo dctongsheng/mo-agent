@@ -103,7 +103,14 @@ export function ModelConfigSettings() {
                 onChange={(v) => moPort && setEvolveModelConfig(moPort, { optimizer_model: v }).then(setEvo).then(() => flash("已保存"))} />
               <SelRow label="评测 eval" value={evo.eval_model} options={epModels(evo.endpoint_id).map((m) => ({ v: m, t: m }))}
                 onChange={(v) => moPort && setEvolveModelConfig(moPort, { eval_model: v }).then(setEvo).then(() => flash("已保存"))} />
+              <SelRow label="审查 critic" value={evo.critic_model} options={epModels(evo.endpoint_id).map((m) => ({ v: m, t: m }))}
+                onChange={(v) => moPort && setEvolveModelConfig(moPort, { critic_model: v }).then(setEvo).then(() => flash("已保存"))} />
+              <SelRow label="反思 reflect" value={evo.reflect_model} options={epModels(evo.endpoint_id).map((m) => ({ v: m, t: m }))}
+                onChange={(v) => moPort && setEvolveModelConfig(moPort, { reflect_model: v }).then(setEvo).then(() => flash("已保存"))} />
             </div>
+            {evo.critic_model === evo.optimizer_model && (
+              <Note>⚠ 审查模型和优化模型相同 —— 同一个模型有同样的盲点,让它审自己的改写只会盖章。换成另一个,交叉审查才有意义。</Note>
+            )}
             <Note>端点的 Base URL + Key 自动复用——不必再填。当前:{epName(evo.endpoint_id)}。</Note>
           </>
         )}

@@ -107,10 +107,10 @@ Known limitations, so you can judge fit before installing:
 | **Platform** | macOS / Apple Silicon only. No Windows or Linux build. |
 | **UI language** | Chinese only. |
 | **Fine-tuning** | Scaffold only — no cloud-training scripts bundled. |
-| **Tests** | The self-evolution core (`server/mo_evolve/`) is covered by `pytest server/tests` — 173 tests, no network. The gateway's routes, the Electron main process and the UI have no automated coverage; CI additionally runs typecheck, build, engine import and license compliance. |
+| **Tests** | The self-evolution core (`server/mo_evolve/`) is covered by `pytest server/tests` — 246 tests, no network. The gateway's routes, the Electron main process and the UI have no automated coverage; CI additionally runs typecheck, build, engine import and license compliance. |
 | **Network** | The UI loads three webfonts from Google Fonts at launch. Your chats, memory and trajectories never leave your machine, but this one request does — self-host the fonts in `index.html` if you need a fully offline app. |
 | **Self-evolution** | Rewrites skill files on disk. Candidates pass hard constraints, a diff-scoped injection scan and a statistical acceptance gate, and every accept is snapshotted and revertible — but a prompt-injected model can still influence skill text, so review the diff. See [SECURITY.md](SECURITY.md). |
-| **夜貘's autonomy** | It optimizes skills against your real chat history, but does not yet *reason* about which one to work on — selection is alphabetical round-robin — and it can't author, split or retire a skill. See [docs/self-evolution.md](docs/self-evolution.md#what-夜貘-cannot-do-yet). |
+| **夜貘's autonomy** | It picks its own target, gives a reason and commits to a checkable prediction — but it reasons from a prepared summary rather than a real agent turn with tools, and it can't author, split or retire a skill. See [docs/self-evolution.md](docs/self-evolution.md#what-夜貘-cannot-do-yet). |
 
 ## Security
 

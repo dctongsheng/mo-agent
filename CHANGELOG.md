@@ -6,6 +6,56 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — 夜貘 chooses, and commits to a prediction
+
+- **Reflection** (`server/mo_evolve/reflect.py`). The nightly loop picked
+  alphabetically, and 夜貘's `SOUL.md` — 「我读它走过的轨迹,找出钝处」 — was
+  written once at profile creation and read by nothing that ran. It now reads
+  its constitution, the recent 差评 turns, the skill list with usage signal and
+  its own run history, and returns a target with a reason and a hypothesis. It
+  can also **abstain**: with no evidence to act on, "I don't know which one to
+  polish" is the correct answer and the alternative is manufacturing noise.
+  Runs on its own thread — the scheduler ticks every 30s and must never block
+  on inference — and falls back to rotation on failure. `SOUL.md` is now
+  load-bearing: editing it changes behaviour.
+- **Falsifiable predictions and a calibration tally** (`verify.py`). A plan
+  states what it expects to happen; after the run that's checked against
+  `metrics.fitness.holdout_dimensions`, judge scores on held-out examples the
+  prediction had no hand in choosing. The running hit rate is shown as
+  「夜貘的判断准确率 7/11」. The tally is the deliverable: a loop that only
+  reports its own activity always looks busy, and a number that goes *down*
+  when 夜貘 is wrong is the cheapest defence against that. Every decidable check
+  must hold; a missing dimension is unverifiable rather than a miss; a
+  prediction with no checks earns nothing.
+- **Cross-model critic** (`critic.py`). When the optimizer and the judge share
+  weights, agreement is cheap — same blind spots on both sides of the desk. The
+  critic reviews the winning rewrite on a different model and refuses to run at
+  all if configured with the optimizer's own model, rather than producing a
+  rubber stamp. Advisory: a `reject` doesn't block, it makes accepting take the
+  same explicit confirmation as a failed gate.
+- Routes `/evolve/plans`, `/evolve/calibration`, `/evolve/reflect`; a
+  「让夜貘自己挑一条」 button; per-run rationale in the runs list; critic and
+  reflect model selectors in Settings.
+
+### Fixed — regressions caught in review
+
+- **A husk evolver profile on fresh installs.** Seeding `SOUL.md` created
+  `profiles/ye-mao-evolve/` before `create_profile()` ran — and
+  `hermes_cli.profiles.list_profiles()` treats any directory under `profiles/`
+  as an existing profile, so creation was skipped and the profile ended up with
+  no `config.yaml`, no `.env` and none of its seeded directories. It also
+  permanently defeated the self-heal path: a user who deleted the profile could
+  never get it re-cloned.
+- **Orphaned predictions from the on-demand path.** A plan made via
+  「让夜貘自己挑一条」 was saved but never attached to the run it justified, so it
+  was never verified and never counted — the tally would have reflected only
+  scheduled runs, which is not the path the new button drives.
+- **Predictions on failed runs were dropped**, contradicting the documented
+  behaviour that unverifiable plans are counted separately.
+- **`critic_model` was unreachable.** The diff modal told users to change it in
+  Settings, where no such control existed and the endpoint silently discarded
+  the key.
+
 ### Added — 夜貘 evolves against your real chat history
 
 - **Trajectory mining** (`server/mo_evolve/trajectory_importer.py`,

@@ -519,6 +519,8 @@ def _mount_mo_routes(app) -> None:
     from mo_evolve.store import EvolveStore
     from mo_evolve import skill_archive as _archive
     from mo_evolve import accept as _accept
+    from mo_evolve import reflect as _reflect
+    from mo_evolve import verify as _verify
 
     _store = EvolveStore(_hermes_root)
     _evolve_lock = _store.lock  # also serializes the fine-tune run ledger below
@@ -540,6 +542,29 @@ def _mount_mo_routes(app) -> None:
         opt = (c.get("optimizer_model") or "").strip() or os.environ.get("MO_EVOLVE_OPTIMIZER_MODEL", "openai/qwen3.6-plus")
         ev = (c.get("eval_model") or "").strip() or os.environ.get("MO_EVOLVE_EVAL_MODEL", "openai/qwen3.5-flash")
         return opt, ev
+
+    def _qualify(model: str) -> str:
+        """DSPy/LiteLLM needs a provider prefix. The PUT handler adds it, but a
+        hand-edited evolve.json or an env override won't have it."""
+        m = (model or "").strip()
+        return ("openai/" + m) if (m and "/" not in m) else m
+
+    def _critic_model() -> str:
+        """Model for the cross-model review. Defaults to the eval model, which
+        already differs from the optimizer — a critic sharing the author's
+        weights shares its blind spots and rubber-stamps."""
+        c = _read_evolve_model_cfg()
+        m = (c.get("critic_model") or "").strip() or os.environ.get("MO_EVOLVE_CRITIC_MODEL", "")
+        if m:
+            return _qualify(m)
+        opt, ev = _evolve_models()
+        return ev if ev != opt else ""
+
+    def _reflect_model() -> str:
+        """Model 夜貘 reasons with when choosing a target."""
+        c = _read_evolve_model_cfg()
+        m = (c.get("reflect_model") or "").strip() or os.environ.get("MO_EVOLVE_REFLECT_MODEL", "")
+        return _qualify(m) if m else _evolve_models()[0]
 
     def _evolve_eval_creds() -> tuple[str, str]:
         """OpenAI-compatible base+key for evaluation. Precedence: evolve.json →
@@ -581,7 +606,16 @@ def _mount_mo_routes(app) -> None:
     _write_runs = _store.write_runs
     _update_run = _store.update_run
 
-    def _spawn_evolution(skill: str, iterations: int, eval_source: str) -> dict:
+    def _verify_quietly(run_id: str) -> None:
+        """Score the run's plan, if it has one. Never raises — a bookkeeping
+        failure must not change the run's recorded outcome."""
+        try:
+            _verify.verify_run(_store, _store.get_run(run_id))
+        except Exception as exc:
+            logging.getLogger("hermes.desktop").warning("verify plan failed: %s", exc)
+
+    def _spawn_evolution(skill: str, iterations: int, eval_source: str,
+                         plan: dict | None = None) -> dict:
         ok, why = _engine_ready()
         if not ok:
             return {"ok": False, "reason": why}
@@ -613,6 +647,13 @@ def _mount_mo_routes(app) -> None:
             "--eval-source", eval_source,
             "--optimizer-model", opt_model, "--eval-model", eval_model,
         ]
+        critic_model = _critic_model()
+        if critic_model:
+            cmd += ["--critic-model", critic_model]
+        # The critic is asked whether the rewrite addresses 夜貘's hypothesis,
+        # so it needs to know what that hypothesis was.
+        if plan and plan.get("hypothesis"):
+            env["MO_EVOLVE_HYPOTHESIS"] = plan["hypothesis"]
         log_path = run_cwd / "run.log"
         entry = {
             "id": run_id, "skill": skill, "iterations": iterations,
@@ -620,6 +661,10 @@ def _mount_mo_routes(app) -> None:
             "created_at": time.time(), "cwd": str(run_cwd),
             "opt_model": opt_model, "eval_model": eval_model,
         }
+        if plan:
+            # Carried as fields so the runs list can show WHY without a join.
+            entry["plan_id"] = plan.get("id")
+            entry["why"] = plan.get("why", "")[:400]
         _store.insert_run(entry)
 
         def _runner():
@@ -641,6 +686,10 @@ def _mount_mo_routes(app) -> None:
             if latest and (latest / "evolved_skill.md").exists():
                 _update_run(run_id, status="done", output_dir=str(latest),
                             finished_at=time.time(), rc=rc)
+                # Score 夜貘's prediction now, not on accept: the claim is about
+                # whether the rewrite worked, which is independent of whether
+                # the user chose to keep it.
+                _verify_quietly(run_id)
                 return
             # A candidate rejected by the hard constraints writes
             # evolved_FAILED.md + failed_constraints.json directly under
@@ -658,11 +707,16 @@ def _mount_mo_routes(app) -> None:
                             constraints_failed=True,
                             error="候选未通过硬约束：" + ("、".join(bad) if bad else "见 run.log"),
                             finished_at=time.time(), rc=rc)
+                _verify_quietly(run_id)
                 return
             _update_run(run_id, status="failed",
                         output_dir=str(latest) if latest else "",
                         error="未产出 evolved_skill（见 run.log）",
                         finished_at=time.time(), rc=rc)
+            # Stamp the plan even here. A failed run produces no holdout scores,
+            # so the prediction lands in `unverifiable` — which is what
+            # verify.py documents, and it was previously dropped entirely.
+            _verify_quietly(run_id)
 
         threading.Thread(target=_runner, daemon=True, name=f"evolve-{run_id}").start()
         return {"ok": True, "run_id": run_id}
@@ -688,7 +742,17 @@ def _mount_mo_routes(app) -> None:
         eval_source = str(body.get("eval_source", "mixed"))
         if eval_source not in ("synthetic", "sessiondb", "trajectory", "mixed"):
             eval_source = "mixed"
-        return _spawn_evolution(skill, iterations, eval_source)
+        # Carry the plan through when this run came from 夜貘 picking the target.
+        # Without it the prediction is saved, never attached to a run, and so
+        # never verified — the tally would only ever reflect scheduled runs,
+        # which is not the path the 「让夜貘自己挑一条」 button drives.
+        plan = None
+        plan_id = str(body.get("plan_id", "")).strip()
+        if plan_id:
+            plan = _reflect.get_plan(_store, plan_id)
+            if plan and plan.get("skill") != skill:
+                plan = None      # the user changed the target; the plan no longer applies
+        return _spawn_evolution(skill, iterations, eval_source, plan=plan)
 
     @router.get("/evolve/runs")
     def evolve_runs():
@@ -701,6 +765,8 @@ def _mount_mo_routes(app) -> None:
         if not run:
             raise HTTPException(404, "run not found")
         result = dict(run)
+        if run.get("plan_id"):
+            result["plan"] = _reflect.get_plan(_store, run["plan_id"])
         out = run.get("output_dir")
         if out:
             od = Path(out)
@@ -728,6 +794,7 @@ def _mount_mo_routes(app) -> None:
             result["evolved"] = evo_txt
             result["metrics"] = _read_json(met, {}) if met.exists() else {}
             result["gate"] = _read_json(od / "gate.json", None)
+            result["critic"] = _read_json(od / "critic.json", None)
 
             safety = _read_json(od / "safety.json", None)
             failed = _read_json(od / "failed_constraints.json", None)
@@ -778,6 +845,36 @@ def _mount_mo_routes(app) -> None:
             # 409 = "we can do this, but not without you saying so again."
             raise HTTPException(409, detail=refused.to_detail())
         return result.to_dict()
+
+    @router.get("/evolve/plans")
+    def evolve_plans(limit: int = 30):
+        return {"data": _reflect.list_plans(_store, limit)}
+
+    @router.get("/evolve/calibration")
+    def evolve_calibration():
+        """夜貘's prediction hit rate.
+
+        The number that makes the reasoning worth something: it goes *down*
+        when 夜貘 is wrong, which is what separates a reasoning step from
+        activity reporting.
+        """
+        cal = _verify.read_calibration(_store)
+        return {**cal, "accuracy": _verify.accuracy(cal)}
+
+    @router.post("/evolve/reflect")
+    def evolve_reflect():
+        """Run reflection on demand — 「让夜貘现在想一想」."""
+        ok, why = _engine_ready()
+        if not ok:
+            return {"ok": False, "reason": why}
+        try:
+            plan = _reflect_now()
+        except Exception as exc:
+            return {"ok": False, "reason": str(exc)}
+        if not plan:
+            return {"ok": True, "abstained": True,
+                    "reason": "证据不足,夜貘这次没有挑出该磨的技艺。"}
+        return {"ok": True, "abstained": False, "data": plan}
 
     @router.get("/evolve/skills/{skill}/versions")
     def evolve_skill_versions(skill: str):
@@ -841,7 +938,8 @@ def _mount_mo_routes(app) -> None:
                 "hour": int(sched.get("hour", 3)), "minute": int(sched.get("minute", 0)),
                 "skill": sched.get("skill", "auto"),
                 "iterations": int(sched.get("iterations", 4)),
-                "eval_source": sched.get("eval_source", "mixed")}
+                "eval_source": sched.get("eval_source", "mixed"),
+                "reflect": bool(sched.get("reflect", True))}
 
     @router.put("/evolve/schedule")
     async def evolve_set_schedule(request: Request):
@@ -855,15 +953,40 @@ def _mount_mo_routes(app) -> None:
             "eval_source": (str(body.get("eval_source", "mixed"))
                             if body.get("eval_source") in ("synthetic", "trajectory", "mixed")
                             else "mixed"),
+            "reflect": bool(body.get("reflect", True)),
         }
         _evolve_dir.mkdir(parents=True, exist_ok=True)
         _write_json(_schedule_file, sched)
         return {"ok": True, "data": sched}
 
+    def _ensure_soul() -> None:
+        """Seed 夜貘's constitution if it's missing.
+
+        Deliberately outside _ensure_evolver_profile's early return: that bails
+        as soon as the profile directory exists, so on any install created
+        before reflection landed the SOUL.md would never be written — and it is
+        now read on every reflection rather than being decoration.
+        """
+        # Deliberately does NOT mkdir. hermes_cli.profiles.list_profiles()
+        # treats any directory under profiles/ as an existing profile — no
+        # marker file needed — so creating this directory early makes
+        # create_profile() skip, leaving a husk with no config.yaml, no .env
+        # and no seeded dirs. It would also permanently defeat the self-heal
+        # below: a user who deletes the profile could never get it re-cloned.
+        if not _evolver_home.exists():
+            return
+        soul = _evolver_home / "SOUL.md"
+        try:
+            if not soul.exists() or not soul.read_text(encoding="utf-8").strip():
+                soul.write_text(_reflect.DEFAULT_CONSTITUTION, encoding="utf-8")
+        except Exception as exc:
+            logging.getLogger("hermes.desktop").warning("seed SOUL.md failed: %s", exc)
+
     def _ensure_evolver_profile() -> None:
         """Make sure the permanent 夜貘（进化）profile exists with seeded skills.
         Runs once on startup; recreates it if the user/anything deleted it."""
         if _evolver_home.exists() and (_evolver_home / "skills").exists():
+            _ensure_soul()   # existing install: only the constitution may be missing
             return
         try:
             sys.path.insert(0, os.environ.get("HERMES_AGENT_ROOT", ""))
@@ -877,25 +1000,61 @@ def _mount_mo_routes(app) -> None:
                 _P.seed_profile_skills(path, quiet=True)
             except Exception:
                 pass
-            # Give it an identity
+            # Give it an identity — the constitution is read on every
+            # reflection, so it has to exist wherever the profile landed.
             soul = Path(path) / "SOUL.md"
             if not soul.exists():
-                soul.write_text(
-                    "# 夜貘 · 进化分身\n\n"
-                    "我是夜行的那一只。白天的小貘陪你做事,我在夜里把它的技艺一遍遍打磨得更趁手。\n"
-                    "我读它走过的轨迹,找出钝处,重写技能,再交回给它。\n",
-                    encoding="utf-8",
-                )
+                soul.write_text(_reflect.DEFAULT_CONSTITUTION, encoding="utf-8")
+            _ensure_soul()
         except Exception as exc:
             logging.getLogger("hermes.desktop").warning("ensure evolver profile failed: %s", exc)
 
     threading.Thread(target=_ensure_evolver_profile, daemon=True, name="ensure-evolver").start()
 
-    # Nightly scheduler thread: at the configured local time, trigger one run
-    # (best-effort). When skill == "auto", rotate through the NON-built-in
-    # (user/custom) skills in name order, one per scheduled run — so every
-    # custom skill gets evolved in turn instead of always picking the biggest.
+    # Nightly scheduler. When skill == "auto", 夜貘 reads its constitution, the
+    # recent 差评 trajectories and its own track record, and picks a target with
+    # a reason and a falsifiable prediction. Alphabetical rotation remains as
+    # the fallback for when it can't or won't choose.
     _next_auto_skill = _store.next_auto_skill
+    _traj_file_path = _hermes_root / "trajectories" / "trajectories.jsonl"
+
+    def _reflect_now() -> dict | None:
+        """One structured LLM call. Returns a saved plan, or None to abstain."""
+        return _reflect.choose_target(
+            _store, _traj_file_path, _evolver_home / "SOUL.md", _reflect_model())
+
+    def _fire_scheduled(sched: dict) -> None:
+        """Pick a target and start a run. Runs on its own thread — reflection
+        makes an LLM call, and the scheduler ticks every 30 seconds."""
+        try:
+            # Check before reflecting: bailing out afterwards would leave a
+            # saved plan with a prediction attached to no run, permanently
+            # unverifiable.
+            if any(r.get("status") == "running" for r in _read_runs()):
+                return
+            skill = sched.get("skill", "auto")
+            plan = None
+            if skill == "auto":
+                if sched.get("reflect", True):
+                    try:
+                        plan = _reflect_now()
+                    except Exception as exc:
+                        logging.getLogger("hermes.desktop").warning("reflection failed: %s", exc)
+                if plan:
+                    skill = plan["skill"]
+                else:
+                    # Abstained or errored — rotation is the safety net, never
+                    # removed, so a bad reflection model can't stall evolution.
+                    skill = _next_auto_skill()
+            if not skill:
+                return
+            if any(r.get("status") == "running" for r in _read_runs()):
+                return          # don't double-fire
+            iterations = int((plan or {}).get("iterations") or sched.get("iterations", 4))
+            source = (plan or {}).get("eval_source") or sched.get("eval_source", "mixed")
+            _spawn_evolution(skill, iterations, source, plan=plan)
+        except Exception as exc:
+            logging.getLogger("hermes.desktop").warning("scheduled evolution failed: %s", exc)
 
     def _scheduler_loop():
         last_fire_day = None
@@ -908,17 +1067,8 @@ def _mount_mo_routes(app) -> None:
                     if (now.tm_hour == sched["hour"] and now.tm_min == sched["minute"]
                             and key != last_fire_day):
                         last_fire_day = key
-                        skill = sched.get("skill", "auto")
-                        if skill == "auto":
-                            skill = _next_auto_skill()
-                        # don't double-fire if a run is already in flight
-                        running = any(r.get("status") == "running" for r in _read_runs())
-                        if skill and not running:
-                            # Default to `mixed`: the nightly loop is exactly
-                            # where real trajectories beat synthetic ones, and
-                            # it falls back to synthetic when too few are mined.
-                            _spawn_evolution(skill, int(sched.get("iterations", 4)),
-                                             sched.get("eval_source", "mixed"))
+                        threading.Thread(target=_fire_scheduled, args=(dict(sched),),
+                                         daemon=True, name="evolve-fire").start()
             except Exception:
                 pass
             time.sleep(30)
@@ -1519,6 +1669,11 @@ def _mount_mo_routes(app) -> None:
             "endpoint_id": ep_id,
             "optimizer_model": (c.get("optimizer_model") or opt).replace("openai/", ""),
             "eval_model": (c.get("eval_model") or ev).replace("openai/", ""),
+            # A critic sharing the optimizer's weights shares its blind spots,
+            # so this has to be settable — the diff modal tells users to come
+            # here when it detects that.
+            "critic_model": (c.get("critic_model") or _critic_model()).replace("openai/", ""),
+            "reflect_model": (c.get("reflect_model") or _reflect_model()).replace("openai/", ""),
             "endpoints": _endpoints_public(),
         }
 
@@ -1530,7 +1685,7 @@ def _mount_mo_routes(app) -> None:
             c["endpoint_id"] = str(body["endpoint_id"]).strip()
             base, key, _ = _resolve_endpoint(c["endpoint_id"])
             c["api_base"], c["api_key"] = base, key
-        for k in ("optimizer_model", "eval_model"):
+        for k in ("optimizer_model", "eval_model", "critic_model", "reflect_model"):
             if k in body:
                 m = str(body[k]).strip()
                 c[k] = ("openai/" + m) if (m and not m.startswith("openai/")) else m

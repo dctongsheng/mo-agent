@@ -161,6 +161,8 @@ export type EvolveRun = {
   /** Failed because a hard constraint rejected the candidate, not because the
    *  run crashed — the rejected text is still viewable. */
   constraints_failed?: boolean;
+  /** Set when 夜貘 chose this target itself rather than by rotation. */
+  plan_id?: string; why?: string;
   // Added as fields, never as new `status` values — STATUS_LABEL/STATUS_COLOR
   // render blank for unknown statuses.
   archive_version?: number; forced?: boolean; gate_passed?: boolean | null; pins?: number;
@@ -206,12 +208,43 @@ export type EvolveRunDetail = EvolveRun & {
   };
   gate?: EvolveGate | null;
   safety?: { findings?: SafetyFinding[] } | null;
+  critic?: EvolveCritique | null;
+  plan?: EvolutionPlan | null;
   /** Present when the candidate was rejected by the hard constraints. The
    *  evolved text shown is `evolved_FAILED.md`. */
   constraints?: { name: string; passed: boolean; message: string; details?: string }[];
   /** True when the live SKILL.md changed after this run started — accepting
    *  would discard the user's own edits. */
   stale_baseline?: boolean;
+};
+/** 夜貘's reasoning for a run: what it picked, why, and what it expects to
+ *  happen — stated before the run so it can be checked afterwards. */
+export type PredictionCheck = {
+  dimension: string; direction: string; threshold: number;
+  outcome?: boolean | null;
+};
+export type EvolutionPlan = {
+  id: string; at: number; skill: string; why: string; hypothesis?: string;
+  eval_source?: string; iterations?: number; model?: string; run_id?: string | null;
+  prediction?: {
+    statement?: string; checks?: PredictionCheck[];
+    check_results?: PredictionCheck[];
+    verified?: boolean | null; verified_at?: number | null;
+  };
+};
+/** A second opinion from a model that is not the author. Advisory: a `reject`
+ *  doesn't block, it just makes accepting take an explicit confirmation. */
+export type EvolveCritique = {
+  verdict: "accept" | "revise" | "reject";
+  rationale: string; risks: string[]; model?: string;
+  collusion?: boolean; skipped?: string; downgrades?: boolean;
+};
+/** How often 夜貘's predictions came true. This number goes DOWN when it is
+ *  wrong, which is what separates reasoning from activity reporting. */
+export type Calibration = {
+  total: number; verified: number; unverifiable?: number;
+  accuracy: number | null;
+  by_skill?: Record<string, { total: number; verified: number; unverifiable: number }>;
 };
 export type SkillVersion = {
   version: number; at: number; run_id?: string; kind?: string;
@@ -220,6 +253,8 @@ export type SkillVersion = {
 export type EvolveSchedule = {
   enabled: boolean; hour: number; minute: number; skill: string;
   iterations: number; eval_source?: EvalSource;
+  /** Let 夜貘 reason about the target instead of rotating alphabetically. */
+  reflect?: boolean;
 };
 
 export const getEvolveStatus = (port: number) => moFetch<EvolveStatus>(port, "/api/mo/evolve/status");
@@ -228,9 +263,15 @@ export const listEvolveSkills = (port: number) => moFetch<{ data: EvolveSkill[] 
  *  too few are found — the default, because a purely synthetic eval set is
  *  synthesized from the skill's own text and the loop is self-referential. */
 export type EvalSource = "mixed" | "trajectory" | "synthetic";
-export const runEvolve = (port: number, skill: string, iterations: number, eval_source: EvalSource = "mixed") =>
+/** `plan_id` attaches 夜貘's reasoning (and its prediction) to the run, so the
+ *  prediction actually gets scored. Without it an on-demand reflection's
+ *  prediction is saved and then never checked. */
+export const runEvolve = (
+  port: number, skill: string, iterations: number,
+  eval_source: EvalSource = "mixed", plan_id?: string,
+) =>
   moFetch<{ ok: boolean; run_id?: string; reason?: string }>(port, "/api/mo/evolve/run", {
-    method: "POST", body: JSON.stringify({ skill, iterations, eval_source }),
+    method: "POST", body: JSON.stringify({ skill, iterations, eval_source, plan_id }),
   });
 export const listEvolveRuns = (port: number) => moFetch<{ data: EvolveRun[] }>(port, "/api/mo/evolve/runs");
 export const getEvolveRun = (port: number, id: string) => moFetch<EvolveRunDetail>(port, `/api/mo/evolve/runs/${encodeURIComponent(id)}`);
@@ -260,6 +301,15 @@ export const acceptEvolveRun = async (
   if (!res.ok) throw new Error(`accept failed: ${res.status}`);
   return res.json();
 };
+
+export const listEvolvePlans = (port: number, limit = 30) =>
+  moFetch<{ data: EvolutionPlan[] }>(port, `/api/mo/evolve/plans?limit=${limit}`);
+export const getCalibration = (port: number) =>
+  moFetch<Calibration>(port, "/api/mo/evolve/calibration");
+/** 「让夜貘现在想一想」 — abstaining is a valid, reported outcome. */
+export const reflectNow = (port: number) =>
+  moFetch<{ ok: boolean; abstained?: boolean; reason?: string; data?: EvolutionPlan }>(
+    port, "/api/mo/evolve/reflect", { method: "POST" });
 
 export const listSkillVersions = (port: number, skill: string) =>
   moFetch<{ data: SkillVersion[]; head: { current_version?: number } }>(
@@ -316,12 +366,20 @@ export const detectEndpointModels = (port: number, id: string) =>
   moFetch<{ ok: boolean; models?: string[]; reason?: string }>(port, `/api/mo/endpoints/${encodeURIComponent(id)}/detect`, { method: "POST" });
 
 export type EmbeddingSel = { endpoint_id: string; model: string; vlm_model: string; dimension: number; endpoints: Endpoint[]; note?: string };
-export type EvolveSel = { endpoint_id: string; optimizer_model: string; eval_model: string; endpoints: Endpoint[] };
+export type EvolveSel = {
+  endpoint_id: string; optimizer_model: string; eval_model: string;
+  /** Reviews the rewrite. Must differ from optimizer_model or the review is a
+   *  rubber stamp — the same weights have the same blind spots. */
+  critic_model: string;
+  /** What 夜貘 reasons with when choosing a target. */
+  reflect_model: string;
+  endpoints: Endpoint[];
+};
 export const getEmbeddingConfig = (port: number) => moFetch<EmbeddingSel>(port, "/api/mo/models/embedding");
 export const setEmbeddingConfig = (port: number, patch: { endpoint_id: string; model: string; vlm_model?: string; dimension?: number }) =>
   moFetch<EmbeddingSel>(port, "/api/mo/models/embedding", { method: "PUT", body: JSON.stringify(patch) });
 export const getEvolveModelConfig = (port: number) => moFetch<EvolveSel>(port, "/api/mo/models/evolve");
-export const setEvolveModelConfig = (port: number, patch: Partial<{ endpoint_id: string; optimizer_model: string; eval_model: string }>) =>
+export const setEvolveModelConfig = (port: number, patch: Partial<{ endpoint_id: string; optimizer_model: string; eval_model: string; critic_model: string; reflect_model: string }>) =>
   moFetch<EvolveSel>(port, "/api/mo/models/evolve", { method: "PUT", body: JSON.stringify(patch) });
 
 export const getEvolveSchedule = (port: number) => moFetch<EvolveSchedule>(port, "/api/mo/evolve/schedule");

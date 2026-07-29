@@ -49,6 +49,12 @@ class EvolutionConfig:
     judge_max_calls: int = 0             # 0 → 4 × max_metric_calls
     judge_cache: bool = True
 
+    # Mo local patch: the reviewer must not be the author. When the optimizer
+    # and the critic share weights they share blind spots, and agreement stops
+    # meaning anything. "" disables the critique entirely rather than running a
+    # rubber stamp.
+    critic_model: str = ""
+
     # Mo local patch: acceptance gate. Upstream's "improvement > 0" is printed,
     # never enforced, and computed on the keyword proxy above.
     min_holdout: int = 5                 # fewer holdout examples → no verdict

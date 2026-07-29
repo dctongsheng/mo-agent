@@ -4,7 +4,7 @@ Mo's defining feature: it rewrites its own skills to get better at them, and onl
 
 A **skill** is a Markdown file (`SKILL.md`) with YAML frontmatter that teaches the agent how to do something well — for example, pitfalls to avoid when scraping a paginated API. Over time, a hand-written skill is rarely optimal. Self-evolution closes that gap automatically.
 
-Two agents share the work. **小貘** (the `default` profile) does your tasks. **夜貘** (`ye-mao-evolve`) polishes the skills 小貘 uses. Today 夜貘 is a scheduled optimizer, not an agent with its own reasoning — see [What 夜貘 cannot do yet](#what-夜貘-cannot-do-yet).
+Two agents share the work. **小貘** (the `default` profile) does your tasks. **夜貘** (`ye-mao-evolve`) polishes the skills 小貘 uses — it reads your trajectories, picks a target, says why, and commits to a prediction that gets checked. See [What 夜貘 cannot do yet](#what-夜貘-cannot-do-yet) for the honest limits.
 
 ## The loop
 
@@ -24,7 +24,7 @@ flowchart TD
     J --> K[Active next session · revertible]
 ```
 
-1. **Pick a skill.** On a schedule, Mo rotates through your non–built-in skills in name order, evolving one per run. You can also trigger a specific skill on demand.
+1. **Pick a skill.** 夜貘 chooses — see [How 夜貘 chooses](#how-夜貘-chooses). Alphabetical rotation remains as the fallback.
 2. **Build an eval set.** From your own chat history by default — see [Where the eval set comes from](#where-the-eval-set-comes-from).
 3. **Optimize (GEPA).** A reflective optimizer proposes rewrites of the skill body and scores each one. The skill body *is* the optimizable parameter: it lives in the DSPy signature's `instructions`, which is what GEPA and MIPROv2 mutate.
 4. **Validate constraints.** The winning candidate must pass every hard constraint (below) or it is rejected and saved as `evolved_FAILED.md` for inspection.
@@ -33,6 +33,66 @@ flowchart TD
 7. **Apply.** Accepting snapshots the current file first, writes atomically, and donates the holdout to the skill's regression pin set. Nothing auto-deploys — a human always presses the button.
 
 Each run is a subprocess; its full log and result are visible in the app (`/api/mo/evolve/runs/{id}/log`).
+
+## How 夜貘 chooses
+
+Before this, the nightly loop picked alphabetically, and 夜貘's `SOUL.md` —
+「我读它走过的轨迹,找出钝处」 — was written once at profile creation and read by
+nothing that ran.
+
+Now it reads its constitution, the recent 差评 turns, the skill list with usage
+signal, and its own run history, and returns one of two things:
+
+- **A plan**: which skill, why, a hypothesis about *why it's blunt*, and a
+  falsifiable prediction.
+- **An abstention.** With no evidence to act on, "I don't know which one to
+  polish" is the correct answer, and it says so. The alternative — always
+  producing a target — is how a loop starts generating noise.
+
+Reflection is one structured call, run on its own thread: the scheduler ticks
+every 30 seconds and must never block on inference. If it fails or abstains,
+alphabetical rotation takes over, so a bad reflection model can't stall
+evolution.
+
+`SOUL.md` is now load-bearing. Editing it changes what 夜貘 does.
+
+### The prediction, and why it matters
+
+A plan commits to something like *"adding a length constraint will raise
+conciseness by ≥0.10 without costing more than 0.02 of correctness"*. After the
+run, that is checked against `metrics.fitness.holdout_dimensions` — judge scores
+on held-out examples the prediction had no hand in choosing — and the result is
+added to a running tally shown as 「夜貘的判断准确率 7/11」.
+
+The tally is the point. A self-improving loop that only reports its own activity
+drifts into what the community Hermes harness calls **bookkeeping theatre**:
+tidy internal changes, no observable improvement, and no way to tell the
+difference from the outside. A number that goes *down* when 夜貘 is wrong is the
+cheapest available defence. If the hit rate sits at chance, the reasoning is
+decoration — and you'll be able to see that.
+
+Rules that keep the tally honest:
+
+- **Every decidable check must hold.** A prediction with an escape hatch isn't falsifiable.
+- **A missing dimension is unverifiable, not a miss.** Punishing 夜貘 for the pipeline's gaps would corrupt the signal.
+- **No checks means unverifiable, not correct.** "I predict something good will happen" earns nothing.
+- Unverifiable plans are counted separately — a 夜貘 that keeps making unfalsifiable predictions is telling you something too.
+
+### The critic
+
+GEPA proposes and GEPA's metric scores. When the optimizer and the judge are the
+same weights, agreement is cheap: same blind spots, same biases, same taste in
+prose on both sides of the desk.
+
+So a critic reviews the winning rewrite on a **different** model, is told it is
+not the proposer, and is asked whether the change actually addresses the
+hypothesis and what it risks. If the configured critic equals the optimizer, it
+refuses to run and says so rather than producing a rubber stamp.
+
+Its verdict is advisory — an LLM's opinion is not a gate — but a `reject` makes
+accepting take the same explicit confirmation as a failed statistical gate. The
+gate says "the numbers don't support this". The critic says "the numbers might,
+and it's still a bad idea".
 
 ## Where the eval set comes from
 
@@ -192,9 +252,10 @@ Every version is listed in the app with a one-click revert, and a revert is itse
 
 Being straight about the current limits, because the UI's poetry is easy to over-read:
 
-- **夜貘 does not choose what to work on.** Scheduled selection is alphabetical round-robin. There is no reflection step in which it reasons about *which* skill is failing you and *why*.
-- **夜貘 cannot author, split, or retire a skill.** It can only rewrite the body of one that already exists.
-- **Its `SOUL.md` is not yet load-bearing.** The identity file in the evolver profile is written once and read by nothing that runs.
+- **夜貘 cannot author, split, or retire a skill.** It can only rewrite the body of one that already exists. A cluster of failures with no covering skill is invisible to it.
+- **Its reasoning is one LLM call, not an agent turn.** It sees a summary someone else assembled; it cannot go read a skill or grep a session to check a hunch. (`hermes --profile ye-mao-evolve chat -q` would give it a real turn with tools — that's the intended route for on-demand use, not the nightly loop.)
+- **The critic is one opinion, not a panel**, and it reviews the winner rather than the search.
+- **Nothing here is verified end-to-end against a live model.** The unit tests cover the decision logic with the LLM faked; the cost and quality of a real run are not yet measured.
 
 ## Configuration
 
@@ -204,7 +265,7 @@ Optimizer and judge models are chosen via the endpoint library (`/api/mo/models/
 
 | Path | Contents |
 |---|---|
-| `server/mo_evolve/` | Mo-original: `store` (run state), `metric` (tiered judge), `gate` (bootstrap + pins), `safety` (scan), `skill_archive` (versions + revert), `accept` (guarded apply). Importable and unit-tested. |
+| `server/mo_evolve/` | Mo-original: `store` (run state), `reflect` (target choice + plans), `verify` (prediction scoring + calibration), `critic` (cross-model review), `trajectory_importer` / `trajectory_dataset` (mining), `metric` (tiered judge), `gate` (bootstrap + pins), `safety` (scan), `skill_archive` (versions + revert), `accept` (guarded apply). Importable and unit-tested. |
 | `server/vendor/evolution/` | The GEPA engine, vendored from NousResearch/hermes-agent-self-evolution (MIT) with Mo's local patches — see `server/vendor/README.md`. |
 | `server/tests/` | `pytest server/tests`. No test touches the network or a real `~/.hermes-mo`. |
 | `server/mo-gateway.py` | Route handlers only; they delegate to `mo_evolve`. |
