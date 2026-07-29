@@ -22,6 +22,34 @@ export type Profile = {
   isEvolver: boolean; // permanent 夜貘（进化）— not deletable
 };
 
+export const UNTITLED = "未命名的一页";
+
+/** Longest title the 240px sidebar shows without eliding — past this the
+ *  ellipsis carries no information, so truncate on a word/clause edge instead
+ *  and let the reader see we cut it. */
+const MAX_TITLE = 24;
+
+/** A session's name is the first thing you said to it.
+ *
+ *  Collapses newlines and runs of whitespace (a pasted block would otherwise
+ *  become a title full of gaps), and prefers to cut at a clause boundary so
+ *  the result reads like a phrase rather than a severed word. */
+export function sessionTitleFrom(text: string): string {
+  const flat = (text || "").replace(/\s+/g, " ").trim();
+  if (!flat) return "";
+  if (flat.length <= MAX_TITLE) return flat;
+
+  const head = flat.slice(0, MAX_TITLE);
+  // Prefer the last sentence/clause break in the back third of the window.
+  const brk = Math.max(
+    head.lastIndexOf("，"), head.lastIndexOf("。"), head.lastIndexOf("、"),
+    head.lastIndexOf("？"), head.lastIndexOf("！"), head.lastIndexOf("；"),
+    head.lastIndexOf(","), head.lastIndexOf("."), head.lastIndexOf(" "),
+  );
+  const cut = brk > MAX_TITLE * 0.6 ? head.slice(0, brk) : head;
+  return cut.trimEnd() + "…";
+}
+
 export type Session = {
   id: string;
   title: string;
@@ -67,7 +95,10 @@ type AppState = {
   newSession: () => Promise<string | null>;
   selectSession: (id: string) => void;
   deleteSession: (id: string) => void;
-  renameCurrentSession: (title: string) => void;
+  /** `sessionId` is required on the first message of a brand-new session:
+   *  newSession() sets currentSessionId via a React setter, so the value this
+   *  callback closes over is still the OLD one when the caller runs. */
+  renameCurrentSession: (title: string, sessionId?: string) => void;
   cycleDoll: () => void;
   petDoll: () => void;
   hideDoll: () => void;
@@ -136,7 +167,7 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
       const list = await gw.listSessions(api);
       setSessions(list.map((s) => ({
         id: s.id,
-        title: s.title?.trim() || "未命名的一页",
+        title: s.title?.trim() || UNTITLED,
         time: gw.formatSessionTime(s.started_at),
         startedAt: s.started_at,
       })));
@@ -254,7 +285,7 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
     try {
       const s = await gw.createSession(api);
       setCurrentSessionId((prev) => { commitPrev(prev); return s.id; });
-      setSessions((ss) => [{ id: s.id, title: "未命名的一页", time: "今天",
+      setSessions((ss) => [{ id: s.id, title: UNTITLED, time: "今天",
                             startedAt: Date.now() / 1000 }, ...ss]);
       setScreen("home");
       return s.id;
@@ -275,11 +306,17 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
     if (api) gw.deleteSession(api, id).catch(() => {});
   }, [currentSessionId]);
 
-  const renameCurrentSession = useCallback((title: string) => {
-    const id = currentSessionId;
+  const renameCurrentSession = useCallback((title: string, sessionId?: string) => {
+    // Prefer the id the caller just created. Relying on currentSessionId alone
+    // silently dropped every first-message rename: newSession() sets it through
+    // a React setter, so this closure still held the previous value (null on a
+    // fresh window) and the `if (!id) return` below swallowed the call. Every
+    // session on disk had title=null as a result.
+    const id = sessionId || currentSessionId;
     if (!id) return;
-    const short = title.slice(0, 16);
-    setSessions((ss) => ss.map((s) => (s.id === id && s.title === "未命名的一页" ? { ...s, title: short } : s)));
+    const short = sessionTitleFrom(title);
+    if (!short) return;
+    setSessions((ss) => ss.map((s) => (s.id === id && s.title === UNTITLED ? { ...s, title: short } : s)));
     const { api } = ports();
     if (api) gw.renameSession(api, id, short).catch(() => {});
   }, [currentSessionId]);

@@ -133,6 +133,16 @@ export function DeskScreen({ mainRef }: { mainRef: React.RefObject<HTMLDivElemen
             })),
         );
         setTimeout(() => sentinelRef.current?.scrollIntoView(), 50);
+
+        // Backfill: every session written before the rename bug was fixed has
+        // title=null on disk and would stay 「未命名的一页」 forever. Its first
+        // user message is right here in the response we already fetched, so
+        // naming it costs nothing extra. renameCurrentSession no-ops unless the
+        // session is still untitled, so this can't overwrite a real name.
+        const firstUser = data.find((m) => m.role === "user" && m.content);
+        if (firstUser?.content) {
+          s.renameCurrentSession(firstUser.content as string, sid);
+        }
       })
       .catch(() => { /* gateway warming up — blank page is fine */ })
       .finally(() => { if (sessionRef.current === sid) setLoadingHistory(false); });
@@ -174,7 +184,9 @@ export function DeskScreen({ mainRef }: { mainRef: React.RefObject<HTMLDivElemen
     setMsgs((prev) => [...prev, { id: now, side: "user", text }]);
     setTimeout(() => sentinelRef.current?.scrollIntoView({ behavior: "smooth" }), 50);
 
-    if (isFirstMessage) s.renameCurrentSession(text);
+    // Pass `sid` explicitly: on a brand-new session it was created moments ago
+    // and appState's currentSessionId hasn't caught up yet.
+    if (isFirstMessage) s.renameCurrentSession(text, sid);
 
     const replyId = now + 1;
     setBusy(true);
