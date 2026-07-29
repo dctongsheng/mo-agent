@@ -323,6 +323,78 @@ export const rejectEvolveRun = (port: number, id: string) =>
 export const getEvolveRunLog = (port: number, id: string, tail = 400) =>
   moFetch<{ data: string; exists: boolean; total_lines?: number; error?: string }>(
     port, `/api/mo/evolve/runs/${encodeURIComponent(id)}/log?tail=${tail}`);
+// ---------- mo extension: curation (清点技艺) ----------
+// Hermes' curator retires skills on a 90-day timer by moving their directories.
+// Mo intercepts that and turns it into a proposal — `guard_installed` reports
+// whether the interception is actually in place, because a guard that silently
+// failed to install would have the UI claiming protection that isn't there.
+export type CuratorStatus = {
+  guard_installed: boolean; clamped: boolean;
+  enabled: boolean | null; paused: boolean | null;
+  stale_after_days: number | null; archive_after_days: number | null;
+  interval_hours: number | null; prune_builtins: boolean | null;
+  last_run_at: string | null; last_run_summary: string | null;
+  run_count: number; last_report_path: string | null;
+  counts: { total?: number; active?: number; stale?: number; archived?: number;
+            pinned?: number; proposed?: number; retired?: number };
+  /** Characters every skill contributes to the always-on system prompt. */
+  index_chars: number; proposed_chars: number;
+};
+export type UsageRow = {
+  name: string; provenance?: string; state?: string; pinned?: boolean;
+  use_count?: number; view_count?: number; patch_count?: number;
+  activity_count?: number; last_activity_at?: string | null;
+  days_idle?: number | null; eligible?: boolean; protected?: boolean;
+  skill_md_chars?: number; _persisted?: boolean;
+};
+export type Retirement = {
+  skill: string; proposed_at: number;
+  reason: "curator-inactivity" | "agent-delete" | "manual";
+  provenance?: string | null; state_at_proposal?: string | null;
+  last_activity_at?: string | null; activity_count?: number; use_count?: number;
+  days_idle?: number | null; pinned?: boolean;
+  skill_md_chars?: number; description?: string; path?: string | null;
+  status: "proposed" | "retired" | "kept";
+  decided_at?: number | null; archive_path?: string | null;
+  /** Whether evolve/archive/<skill>/ holds rewrite history — retiring an
+   *  evolved skill leaves two recovery paths, not one. */
+  has_version_history?: boolean;
+};
+export type ArchivedSkill = { name: string; drifted_from_head: boolean };
+
+export const getCuratorStatus = (port: number) =>
+  moFetch<CuratorStatus>(port, "/api/mo/curator/status");
+export const listCuratorSkills = (port: number) =>
+  moFetch<{ data: UsageRow[] }>(port, "/api/mo/curator/skills");
+export const listRetirements = (port: number, status?: string) =>
+  moFetch<{ data: Retirement[] }>(port, `/api/mo/curator/proposals${status ? `?status=${status}` : ""}`);
+export const retireSkill = (port: number, skill: string) =>
+  moFetch<{ ok: boolean; message: string; activation: string }>(
+    port, `/api/mo/curator/proposals/${encodeURIComponent(skill)}/retire`, { method: "POST" });
+export const keepSkill = (port: number, skill: string, pin = false) =>
+  moFetch<{ ok: boolean; message: string }>(
+    port, `/api/mo/curator/proposals/${encodeURIComponent(skill)}/keep`,
+    { method: "POST", body: JSON.stringify({ pin }) });
+export const listArchivedSkills = (port: number) =>
+  moFetch<{ data: ArchivedSkill[] }>(port, "/api/mo/curator/archived");
+export const restoreArchivedSkill = (port: number, skill: string) =>
+  moFetch<{ ok: boolean; message: string; drifted_from_head: boolean }>(
+    port, `/api/mo/curator/archived/${encodeURIComponent(skill)}/restore`, { method: "POST" });
+export const setCuratorPaused = (port: number, paused: boolean) =>
+  moFetch<CuratorStatus>(port, "/api/mo/curator/paused",
+    { method: "PUT", body: JSON.stringify({ paused }) });
+export const runCurator = (port: number, dry_run = false) =>
+  moFetch<{ ok: boolean; result?: any; proposed?: number; reason?: string }>(
+    port, "/api/mo/curator/run", { method: "POST", body: JSON.stringify({ dry_run }) });
+export const setCuratorThresholds = (
+  port: number, patch: Partial<{ stale_after_days: number; archive_after_days: number;
+                                 interval_hours: number; prune_builtins: boolean }>,
+) => moFetch<CuratorStatus>(port, "/api/mo/curator/thresholds",
+    { method: "PUT", body: JSON.stringify(patch) });
+export const pinSkill = (port: number, skill: string, pinned: boolean) =>
+  moFetch<{ ok: boolean }>(port, `/api/mo/curator/skills/${encodeURIComponent(skill)}/pin`,
+    { method: "POST", body: JSON.stringify({ pinned }) });
+
 // ---------- mo extension: local models (Ollama) ----------
 export type LocalStatus = { installed: boolean; running: boolean; endpoint: string; local_active: boolean; current_model: string; current_provider: string };
 export type LocalModel = { name: string; size: number };

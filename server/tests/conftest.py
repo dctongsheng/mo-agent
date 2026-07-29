@@ -21,6 +21,16 @@ for _p in (str(_SERVER), str(_SERVER / "vendor")):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
+# The Hermes core, so tests can drive the REAL agent.curator rather than a
+# reimplementation of it. Kept separate from the HERMES_AGENT_ROOT env var,
+# which tmp_hermes_home deliberately points at a nonexistent directory so
+# fixture skills aren't misclassified as bundled. Without this, the guard tests
+# hit `importorskip` and silently skip — a skipped regression test looks green
+# and guards nothing.
+_HERMES_CORE = _SERVER.parent / "vendor" / "hermes-agent"
+if _HERMES_CORE.exists() and str(_HERMES_CORE) not in sys.path:
+    sys.path.append(str(_HERMES_CORE))
+
 
 SKILL_TEMPLATE = """---
 name: {name}

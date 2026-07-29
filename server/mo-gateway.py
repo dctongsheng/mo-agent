@@ -521,9 +521,43 @@ def _mount_mo_routes(app) -> None:
     from mo_evolve import accept as _accept
     from mo_evolve import reflect as _reflect
     from mo_evolve import verify as _verify
+    from mo_evolve import curator as _curator
 
     _store = EvolveStore(_hermes_root)
     _evolve_lock = _store.lock  # also serializes the fine-tune run ledger below
+
+    def _install_curator_guard() -> None:
+        """Stop Hermes retiring skills on a timer; make it propose instead.
+
+        Hermes' curator runs from the gateway's hourly housekeeping tick — the
+        gateway this file starts — and at archive_after_days (90) it `mv`s a
+        skill's directory into .archive/ with no prompt and no UI trace. On the
+        machine this was written, it had already marked 52 skills stale with the
+        90-day line falling on 2026-09-17.
+
+        Installed SYNCHRONOUSLY here rather than on a daemon thread (unlike
+        _ensure_evolver_profile): _mount_mo_routes runs during dashboard startup,
+        which precedes start_gateway, and the guard has to beat the first tick.
+        """
+        try:
+            ok, why = _curator.install_guard(_store)
+        except Exception as exc:
+            ok, why = False, str(exc)
+        log = logging.getLogger("hermes.desktop")
+        if ok:
+            log.info("curator guard: %s", why)
+        else:
+            # Fail-safe: if the swap didn't take, make the timer unreachable.
+            # A guard that silently failed to install is the worst outcome —
+            # the UI would claim protection that isn't there.
+            log.warning("curator guard NOT installed (%s) — clamping "
+                        "archive_after_days instead", why)
+            try:
+                _curator.clamp_archive_days(_hermes_root)
+            except Exception as exc:
+                log.error("curator clamp also failed: %s", exc)
+
+    _install_curator_guard()
 
     # Eval/optimizer models route through DSPy→LiteLLM at the OpenAI-compatible
     # endpoint configured for the gateway (OPENAI_API_BASE/KEY). Fall back to
@@ -845,6 +879,127 @@ def _mount_mo_routes(app) -> None:
             # 409 = "we can do this, but not without you saying so again."
             raise HTTPException(409, detail=refused.to_detail())
         return result.to_dict()
+
+    # ---- curation (清点技艺) ----
+    # Hermes' curator decides what's dead weight; Mo decides nothing without
+    # you. These routes surface the former and gate the latter.
+
+    @router.get("/curator/status")
+    def curator_status():
+        return _curator.status(_store)
+
+    @router.get("/curator/skills")
+    def curator_skills():
+        return {"data": _curator.usage_rows(_store)}
+
+    @router.get("/curator/proposals")
+    def curator_proposals(status: str | None = None):
+        # Fold in anything newly eligible so the list is never stale-by-omission.
+        try:
+            _curator.sync_proposals(_store)
+        except Exception:
+            pass
+        return {"data": _curator.list_proposals(_store, status)}
+
+    @router.post("/curator/proposals/{skill}/retire")
+    def curator_retire(skill: str):
+        prop = _curator.get_proposal(_store, skill)
+        if not prop:
+            raise HTTPException(404, "no such proposal")
+        # Same staleness argument as accept: don't act on a stale reading of
+        # a file the user has since edited.
+        target = _store.find_skill_file(skill)
+        if target is not None and prop.get("skill_md_chars"):
+            try:
+                if len(target.read_text(encoding="utf-8")) != prop["skill_md_chars"]:
+                    raise HTTPException(409, detail={
+                        "error": "stale_proposal",
+                        "message": "这条技艺在提案之后被改过了，先看一眼再决定。",
+                    })
+            except HTTPException:
+                raise
+            except Exception:
+                pass
+        ok, msg = _curator.apply_retirement(_store, skill)
+        if not ok:
+            raise HTTPException(400, msg)
+        return {"ok": True, "message": msg, "activation": "next_start"}
+
+    @router.post("/curator/proposals/{skill}/keep")
+    async def curator_keep(skill: str, request: Request):
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        ok, msg = _curator.keep(_store, skill, pin=bool(body.get("pin", False)))
+        return {"ok": ok, "message": msg}
+
+    @router.get("/curator/archived")
+    def curator_archived():
+        rows = _curator.archived_rows(_store)
+        for r in rows:
+            r["drifted_from_head"] = _curator.drifted_from_head(_store, r["name"])
+        return {"data": rows}
+
+    @router.post("/curator/archived/{skill}/restore")
+    def curator_restore(skill: str):
+        ok, msg = _curator.restore(_store, skill)
+        if not ok:
+            raise HTTPException(400, msg)
+        return {"ok": True, "message": msg,
+                "drifted_from_head": _curator.drifted_from_head(_store, skill),
+                "activation": "next_start"}
+
+    @router.put("/curator/paused")
+    async def curator_set_paused(request: Request):
+        body = await request.json()
+        ok, msg = _curator.set_paused(bool(body.get("paused", False)))
+        if not ok:
+            raise HTTPException(400, msg)
+        return _curator.status(_store)
+
+    @router.post("/curator/run")
+    async def curator_run(request: Request):
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        return _curator.run_now(_store, dry_run=bool(body.get("dry_run", False)))
+
+    @router.put("/curator/thresholds")
+    async def curator_thresholds(request: Request):
+        body = await request.json()
+        def _int(k, lo, hi):
+            v = body.get(k)
+            return max(lo, min(hi, int(v))) if v is not None else None
+        ok, msg = _curator.set_thresholds(
+            stale_after_days=_int("stale_after_days", 1, 3650),
+            archive_after_days=_int("archive_after_days", 1, 36500),
+            interval_hours=_int("interval_hours", 1, 8760),
+            prune_builtins=(bool(body["prune_builtins"])
+                            if "prune_builtins" in body else None),
+        )
+        if not ok:
+            raise HTTPException(400, msg)
+        return _curator.status(_store)
+
+    @router.post("/curator/skills/{skill}/pin")
+    async def curator_pin(skill: str, request: Request):
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        ok, msg = _curator.set_pinned(skill, bool(body.get("pinned", True)))
+        if not ok:
+            raise HTTPException(400, msg)
+        return {"ok": True}
+
+    @router.post("/curator/skills/{skill}/adopt")
+    def curator_adopt(skill: str):
+        ok, msg = _curator.adopt(skill)
+        if not ok:
+            raise HTTPException(400, msg)
+        return {"ok": True, "message": msg}
 
     @router.get("/evolve/plans")
     def evolve_plans(limit: int = 30):

@@ -5,6 +5,7 @@ import { useAppState } from "../appState";
 import { GrowthRings } from "../components/GrowthRings";
 import { TapeCard } from "../components/TapeCard";
 import { HarnessEvolve } from "./HarnessEvolve";
+import { HarnessCurate } from "./HarnessCurate";
 import {
   getEvolutionStats, listTrajectories, labelTrajectory, scheduleMolting,
   EvolutionStats, Trajectory,
@@ -168,6 +169,7 @@ export function EvolveScreen() {
 
       {/* Harness self-evolution (skills via GEPA) */}
       <HarnessEvolve />
+      <HarnessCurate />
     </div>
   );
 }
