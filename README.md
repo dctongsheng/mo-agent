@@ -17,11 +17,11 @@
 
 ## What makes Mo different
 
-Most agents are static: the prompt and skills you ship are the prompt and skills you keep. **Mo evolves.** It records the trajectories of the work it does for you, then — on a schedule or on demand — runs a [GEPA](https://arxiv.org/abs/2507.19457)-style optimization loop that rewrites one of its own skills, validates the new version against synthetic evaluations and hard constraints, and only deploys it if it genuinely scores better.
+Most agents are static: the prompt and skills you ship are the prompt and skills you keep. **Mo evolves.** It records the trajectories of the work it does for you, then — on a schedule or on demand — runs a [GEPA](https://arxiv.org/abs/2507.19457)-style optimization loop that rewrites one of its own skills, scores it against *your own chat history* with an LLM judge, and only arms the deploy button if a statistical gate says the improvement is real.
 
 The result is an agent whose competence is not frozen at install time. The skills you use most get sharper the more you use them.
 
-- 🧬 **Self-evolving skills** — a nightly optimizer rotates through your custom skills, improving them one at a time. Every candidate must beat the baseline on a generated eval set and pass size / growth / structure constraints before it ships.
+- 🧬 **Self-evolving skills** — a nightly optimizer rotates through your custom skills, improving them one at a time. Candidates are judged on the exchanges you marked 好评/差评, must clear a paired-bootstrap significance gate and a regression pin set, and pass size / growth / structure / injection constraints. Nothing auto-deploys, and every accepted rewrite is snapshotted and revertible.
 - 🖥️ **Real desktop agent** — chat, terminal, file access and a tool-calling loop, powered by the Hermes Agent core.
 - 🏠 **Local-first & private** — point it at local models (Ollama) or any OpenAI-compatible endpoint. Your memory and trajectories stay on your machine.
 - 🧠 **Persistent memory** — long-term semantic memory via a pluggable backend (OpenViking), with recall tuned to skip trivial messages.
