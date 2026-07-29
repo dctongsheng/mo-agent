@@ -300,7 +300,7 @@ export function DeskScreen({ mainRef }: { mainRef: React.RefObject<HTMLDivElemen
                   display: "flex", alignItems: "center", justifyContent: "center",
                   fontFamily: "'Noto Serif SC', serif", fontSize: 13, transform: "rotate(-4deg)", marginTop: 4,
                 }}>貘</div>
-                <TapeCard tapeLeft={true} tapeRotate="-3deg" style={{ maxWidth: "78%", padding: "18px 20px 16px" }}>
+                <TapeCard tapeLeft={true} tapeRotate="-3deg" style={{ flex: 1, minWidth: 0, padding: "18px 20px 16px" }}>
                   <div style={{ border: "1px dashed var(--line-2)", borderRadius: 6, padding: "12px 14px", display: "flex", flexDirection: "column", gap: 7, marginBottom: 14 }}>
                     <div style={{ fontSize: 10, letterSpacing: "0.18em", color: "var(--ink-3)", fontFamily: "'JetBrains Mono', monospace", marginBottom: 2 }}>实验记录 · TRACE</div>
                     {SEED_TRACE.map((t, i) => (
@@ -344,7 +344,15 @@ export function DeskScreen({ mainRef }: { mainRef: React.RefObject<HTMLDivElemen
                 }}>貘</div>
               )}
               <div style={{
-                maxWidth: "72%",
+                // The agent's reply fills the column: its content is prose,
+                // lists and code that read badly in a narrow measure, and it's
+                // left-aligned so there's nothing for the whitespace to
+                // balance against. A user turn stays a bubble — right-aligned
+                // text set full-width reads as a wall.
+                // minWidth:0 lets a flex child actually wrap long code lines.
+                ...(m.side === "agent"
+                  ? { flex: 1, minWidth: 0 }
+                  : { maxWidth: "72%" }),
                 background: m.side === "user" ? "var(--indigo-soft)" : "var(--card)",
                 border: m.side === "user" ? "none" : "1px solid var(--line)",
                 borderRadius: m.side === "user" ? "12px 12px 3px 12px" : 4,
