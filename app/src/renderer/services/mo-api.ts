@@ -23,7 +23,10 @@ async function getDashToken(port: number): Promise<string> {
   return m[1];
 }
 
-export async function moFetch<T = any>(port: number, path: string, init?: RequestInit): Promise<T> {
+/** Authenticated fetch that hands back the raw Response, so a caller can treat
+ *  a specific status as data rather than an error (the accept route answers 409
+ *  with a gate verdict the user needs to see). */
+export async function moFetchRaw(port: number, path: string, init?: RequestInit): Promise<Response> {
   const token = await getDashToken(port);
   const res = await fetch(`${getBaseUrl(port)}${path}`, {
     ...init,
@@ -34,6 +37,11 @@ export async function moFetch<T = any>(port: number, path: string, init?: Reques
     },
   });
   if (res.status === 401) { tokenCache = null; throw new Error("HTTP 401"); }
+  return res;
+}
+
+export async function moFetch<T = any>(port: number, path: string, init?: RequestInit): Promise<T> {
+  const res = await moFetchRaw(port, path, init);
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json() as Promise<T>;
 }
@@ -150,10 +158,53 @@ export type EvolveRun = {
   status: "running" | "done" | "failed" | "accepted" | "rejected";
   created_at: number; finished_at?: number; error?: string;
   opt_model?: string; eval_model?: string; applied_to?: string;
+  /** Failed because a hard constraint rejected the candidate, not because the
+   *  run crashed — the rejected text is still viewable. */
+  constraints_failed?: boolean;
+  // Added as fields, never as new `status` values — STATUS_LABEL/STATUS_COLOR
+  // render blank for unknown statuses.
+  archive_version?: number; forced?: boolean; gate_passed?: boolean | null; pins?: number;
 };
+/** Paired-bootstrap verdict on the holdout. `passed` arms the accept button;
+ *  a failing gate still allows accept, but only via an explicit force-confirm. */
+export type EvolveGate = {
+  passed: boolean; reason: string;
+  delta: number; ci_low: number; ci_high: number; n: number;
+  pin_regressions?: { task_input: string; baseline: number; evolved: number; delta: number }[];
+  degraded?: boolean;
+};
+/** How the scores were actually produced. Before the tiered judge landed,
+ *  every number the UI showed was a bag-of-words overlap wearing an
+ *  "LLM-as-judge" label; `metric_mode` is what keeps that honest. */
+export type EvolveFitness = {
+  metric_mode?: "heuristic" | "tiered" | "judge";
+  judge_model?: string;
+  heuristic_calls?: number; judge_calls?: number; judge_failures?: number;
+  cache_hits?: number; capped?: boolean; degraded?: boolean; collusion_risk?: boolean;
+  holdout_dimensions?: {
+    baseline: Record<string, number>;
+    evolved: Record<string, number>;
+  };
+};
+export type SafetyFinding = { severity: "high" | "medium"; pattern: string; line: string; why: string };
 export type EvolveRunDetail = EvolveRun & {
   baseline?: string; evolved?: string; diff?: string;
-  metrics?: { baseline_score?: number; evolved_score?: number; improvement?: number; baseline_size?: number; evolved_size?: number };
+  metrics?: {
+    baseline_score?: number; evolved_score?: number; improvement?: number;
+    baseline_size?: number; evolved_size?: number; fitness?: EvolveFitness;
+  };
+  gate?: EvolveGate | null;
+  safety?: { findings?: SafetyFinding[] } | null;
+  /** Present when the candidate was rejected by the hard constraints. The
+   *  evolved text shown is `evolved_FAILED.md`. */
+  constraints?: { name: string; passed: boolean; message: string; details?: string }[];
+  /** True when the live SKILL.md changed after this run started — accepting
+   *  would discard the user's own edits. */
+  stale_baseline?: boolean;
+};
+export type SkillVersion = {
+  version: number; at: number; run_id?: string; kind?: string;
+  sha256?: string; size?: number; existed?: boolean; forced?: boolean;
 };
 export type EvolveSchedule = { enabled: boolean; hour: number; minute: number; skill: string; iterations: number };
 
@@ -165,8 +216,40 @@ export const runEvolve = (port: number, skill: string, iterations: number, eval_
   });
 export const listEvolveRuns = (port: number) => moFetch<{ data: EvolveRun[] }>(port, "/api/mo/evolve/runs");
 export const getEvolveRun = (port: number, id: string) => moFetch<EvolveRunDetail>(port, `/api/mo/evolve/runs/${encodeURIComponent(id)}`);
-export const acceptEvolveRun = (port: number, id: string) =>
-  moFetch(port, `/api/mo/evolve/runs/${encodeURIComponent(id)}/accept`, { method: "POST" });
+export type AcceptResult = {
+  ok: true; applied_to: string; archive_version: number;
+  pins: number; forced: boolean; gate_passed: boolean | null;
+  activation: "next_session";
+};
+export type AcceptRefusal = {
+  ok: false; error: "gate_failed" | "stale_baseline" | "no_candidate";
+  message: string; verdict?: EvolveGate;
+};
+/** Accepting is refused (409) when the gate failed or the live skill drifted.
+ *  Pass `force` to override — the UI requires a second confirmation for that. */
+export const acceptEvolveRun = async (
+  port: number, id: string, force = false,
+): Promise<AcceptResult | AcceptRefusal> => {
+  const res = await moFetchRaw(port, `/api/mo/evolve/runs/${encodeURIComponent(id)}/accept`, {
+    method: "POST",
+    body: JSON.stringify({ force }),
+  });
+  if (res.status === 409) {
+    const body = await res.json().catch(() => ({}));
+    const d = body?.detail ?? {};
+    return { ok: false, error: d.error ?? "gate_failed", message: d.message ?? "未通过采纳门槛", verdict: d.verdict };
+  }
+  if (!res.ok) throw new Error(`accept failed: ${res.status}`);
+  return res.json();
+};
+
+export const listSkillVersions = (port: number, skill: string) =>
+  moFetch<{ data: SkillVersion[]; head: { current_version?: number } }>(
+    port, `/api/mo/evolve/skills/${encodeURIComponent(skill)}/versions`);
+export const revertSkill = (port: number, skill: string, version?: number) =>
+  moFetch<{ ok: boolean; message: string }>(
+    port, `/api/mo/evolve/skills/${encodeURIComponent(skill)}/revert`,
+    { method: "POST", body: JSON.stringify({ version }) });
 export const rejectEvolveRun = (port: number, id: string) =>
   moFetch(port, `/api/mo/evolve/runs/${encodeURIComponent(id)}/reject`, { method: "POST" });
 export const getEvolveRunLog = (port: number, id: string, tail = 400) =>

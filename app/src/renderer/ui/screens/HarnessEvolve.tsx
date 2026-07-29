@@ -7,7 +7,8 @@ import { ModelEvolve } from "./ModelEvolve";
 import {
   getEvolveStatus, listEvolveSkills, runEvolve, listEvolveRuns, getEvolveRun,
   acceptEvolveRun, rejectEvolveRun, getEvolveSchedule, setEvolveSchedule, getEvolveRunLog,
-  EvolveStatus, EvolveSkill, EvolveRun, EvolveRunDetail, EvolveSchedule,
+  listSkillVersions, revertSkill,
+  EvolveStatus, EvolveSkill, EvolveRun, EvolveRunDetail, EvolveSchedule, SkillVersion,
 } from "../../services/mo-api";
 
 function fmt(ts?: number): string {
@@ -22,6 +23,13 @@ const STATUS_LABEL: Record<string, string> = {
 const STATUS_COLOR: Record<string, string> = {
   running: "var(--moon)", done: "var(--indigo)", failed: "var(--seal)",
   accepted: "var(--moss)", rejected: "var(--ink-3)",
+};
+
+/** How a run's scores were produced. Until the tiered judge landed, every
+ *  number here came from a bag-of-words overlap — showing the mode is what
+ *  keeps the improvement figure honest. */
+const METRIC_LABEL: Record<string, string> = {
+  heuristic: "词袋启发式", tiered: "分层评审", judge: "全量 LLM 评审",
 };
 
 /** Harness 自进化 · 技艺 — drives the GEPA skill-evolution pipeline. */
@@ -39,6 +47,11 @@ export function HarnessEvolve() {
   const [includeBuiltin, setIncludeBuiltin] = useState(false);
   const [logRun, setLogRun] = useState<EvolveRun | null>(null);
   const [logText, setLogText] = useState("");
+  // Set when the backend refuses an accept (409) — turns 采纳 into a two-step
+  // force-confirm rather than silently failing.
+  const [refusal, setRefusal] = useState<string | null>(null);
+  const [versions, setVersions] = useState<SkillVersion[]>([]);
+  const [notice, setNotice] = useState<string | null>(null);
 
   // Built-in Hermes skills are hidden by default; flip the toggle to evolve them.
   const visibleSkills = includeBuiltin ? skills : skills.filter((s) => !s.builtin);
@@ -82,6 +95,7 @@ export function HarnessEvolve() {
 
   const open = (id: string) => {
     if (!moPort) return;
+    setRefusal(null);   // a fresh look starts from the un-forced state
     getEvolveRun(moPort, id).then(setOpenRun).catch(() => {});
   };
 
@@ -103,13 +117,43 @@ export function HarnessEvolve() {
     return () => clearInterval(t);
   }, [moPort, logRun, runs]);
 
-  const accept = (id: string) => {
+  // Accepting is refused when the gate failed or the skill drifted. The refusal
+  // is not an error to swallow — it becomes a second, explicit confirmation, so
+  // a regression can still be deployed but never by a single stray click.
+  const accept = (id: string, force = false) => {
     if (!moPort) return;
-    acceptEvolveRun(moPort, id).then(() => { setOpenRun(null); refresh(); }).catch(() => {});
+    acceptEvolveRun(moPort, id, force).then((r) => {
+      if (r.ok) {
+        setRefusal(null);
+        setOpenRun(null);
+        refresh();
+        setNotice(`已写回 · 存为 v${String(r.archive_version).padStart(4, "0")} · 下次新会话生效`);
+      } else {
+        setRefusal(r.message);
+      }
+    }).catch(() => {});
   };
   const reject = (id: string) => {
     if (!moPort) return;
     rejectEvolveRun(moPort, id).then(() => { setOpenRun(null); refresh(); }).catch(() => {});
+  };
+
+  const loadVersions = useCallback((name: string) => {
+    if (!moPort || !name) { setVersions([]); return; }
+    listSkillVersions(moPort, name)
+      .then((r) => setVersions(r.data))
+      .catch(() => setVersions([]));
+  }, [moPort]);
+
+  useEffect(() => { loadVersions(skill); }, [skill, loadVersions]);
+
+  const doRevert = (version: number) => {
+    if (!moPort || !skill) return;
+    if (!confirm(`把「${skill}」回退到 v${String(version).padStart(4, "0")}？当前内容会先存档。`)) return;
+    revertSkill(moPort, skill, version).then((r) => {
+      setNotice(r.message + " · 下次新会话生效");
+      loadVersions(skill);
+    }).catch(() => setNotice("回退失败"));
   };
 
   const saveSched = (patch: Partial<EvolveSchedule>) => {
@@ -212,6 +256,37 @@ export function HarnessEvolve() {
               </div>
             ))}
           </div>
+
+          {/* Versions & revert. Accepting used to be a one-way door: a bare
+              write_text with no backup. Every accept now snapshots first, so
+              any rewrite can be undone byte-for-byte. */}
+          <div style={{ borderTop: "1px dashed var(--line)", marginTop: 18, paddingTop: 14 }}>
+            <div style={{ fontSize: 13.5, fontWeight: 600, marginBottom: 8 }}>
+              版本与回退 · {skill || "（未选技艺）"}
+            </div>
+            {versions.length === 0 ? (
+              <div style={{ fontSize: 12, color: "var(--ink-3)" }}>这条技艺还没有被改写过。</div>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: 180, overflowY: "auto" }}>
+                {versions.map((v) => (
+                  <div key={v.version} style={{
+                    display: "flex", alignItems: "center", gap: 10, fontSize: 12,
+                    fontFamily: "'JetBrains Mono', monospace", color: "var(--ink-2)",
+                  }}>
+                    <span style={{ color: "var(--ink-3)" }}>v{String(v.version).padStart(4, "0")}</span>
+                    <span style={{ flex: 1, color: "var(--ink-3)" }}>
+                      {fmt(v.at)}{v.forced ? " · 强制" : ""}{v.kind === "pre-revert" ? " · 回退前" : ""}
+                    </span>
+                    <button onClick={() => doRevert(v.version)} style={{
+                      border: "1px solid var(--line-2)", background: "transparent", color: "var(--ink-2)",
+                      borderRadius: 6, fontSize: 11, padding: "2px 8px", cursor: "pointer",
+                    }}>回退到此</button>
+                  </div>
+                ))}
+              </div>
+            )}
+            {notice && <div style={{ fontSize: 11.5, color: "var(--moss)", marginTop: 8 }}>{notice}</div>}
+          </div>
         </TapeCard>
       </div>
 
@@ -241,6 +316,100 @@ export function HarnessEvolve() {
             </div>
             <div style={{ flex: 1, overflowY: "auto", padding: "16px 22px" }}>
               {openRun.error && <div style={{ color: "var(--seal)", fontSize: 13, marginBottom: 12 }}>错误：{openRun.error}</div>}
+
+              {/* Gate banner — the paired-bootstrap verdict on the holdout.
+                  Before this existed, "improvement > 0" was printed to a log
+                  and enforced nowhere, so a regression was one click from
+                  deployment. */}
+              {openRun.gate && (
+                <div style={{
+                  marginBottom: 14, padding: "10px 14px", borderRadius: 9, fontSize: 12.5, lineHeight: 1.6,
+                  border: `1px solid ${openRun.gate.passed ? "var(--moss)" : "var(--moon)"}`,
+                  background: openRun.gate.passed ? "var(--moss-soft)" : "transparent",
+                  color: openRun.gate.passed ? "var(--moss)" : "var(--moon)",
+                }}>
+                  <div style={{ fontWeight: 600 }}>
+                    {openRun.gate.passed ? "✓ 通过采纳门槛" : "⚠ 未通过采纳门槛"}
+                  </div>
+                  {/* gate.reason already carries the specific degraded cause —
+                      a fallback and a high failure rate need different wording. */}
+                  <div style={{ color: openRun.gate.degraded ? "var(--seal)" : "var(--ink-2)", marginTop: 3 }}>
+                    {openRun.gate.reason}
+                  </div>
+                  {!!openRun.gate.pin_regressions?.length && (
+                    <div style={{ color: "var(--seal)", marginTop: 3 }}>
+                      在 {openRun.gate.pin_regressions.length} 条历史钉集样本上回归。
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Rejected by a hard constraint. The candidate below is
+                  evolved_FAILED.md — shown deliberately, because a rewrite
+                  rejected *for* an injection finding is the one most worth
+                  reading. It is not deployable and has no accept button. */}
+              {!!openRun.constraints?.length && (
+                <div style={{ marginBottom: 14, padding: "10px 14px", borderRadius: 9, fontSize: 12.5,
+                              border: "1px solid var(--seal)", lineHeight: 1.6 }}>
+                  <div style={{ fontWeight: 600, color: "var(--seal)" }}>候选未通过硬约束 · 未写回</div>
+                  {openRun.constraints.filter((c) => !c.passed).map((c, i) => (
+                    <div key={i} style={{ marginTop: 3, color: "var(--ink-2)" }}>
+                      <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11 }}>[{c.name}]</span>{" "}{c.message}
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {/* Safety findings. Evolved text is written by a model into a
+                  file the agent loads, so anything the rewrite *introduced*
+                  gets surfaced before you approve it. */}
+              {!!openRun.safety?.findings?.length && (
+                <div style={{ marginBottom: 14, padding: "10px 14px", borderRadius: 9, fontSize: 12.5,
+                              border: "1px solid var(--moon)", lineHeight: 1.6 }}>
+                  <div style={{ fontWeight: 600, color: "var(--moon)" }}>新增内容里有 {openRun.safety.findings.length} 处需要过目</div>
+                  {openRun.safety.findings.slice(0, 6).map((f, i) => (
+                    <div key={i} style={{ marginTop: 4, color: f.severity === "high" ? "var(--seal)" : "var(--ink-2)" }}>
+                      <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11 }}>
+                        [{f.severity === "high" ? "高危" : "留意"} · {f.pattern}]
+                      </span>{" "}{f.why}
+                      <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: "var(--ink-3)",
+                                    whiteSpace: "pre-wrap", wordBreak: "break-all" }}>{f.line}</div>
+                    </div>
+                  ))}
+                  {openRun.safety.findings.length > 6 && (
+                    <div style={{ marginTop: 4, color: "var(--ink-3)" }}>…还有 {openRun.safety.findings.length - 6} 处</div>
+                  )}
+                </div>
+              )}
+
+              {openRun.stale_baseline && (
+                <div style={{ marginBottom: 14, padding: "10px 14px", borderRadius: 9, fontSize: 12.5,
+                              border: "1px solid var(--seal)", color: "var(--seal)" }}>
+                  这条技艺在本次进化开始后被改动过 —— 采纳会覆盖那些改动（旧内容仍会存档，可回退）。
+                </div>
+              )}
+
+              {/* How the numbers were made. A "+0.083" from a bag-of-words
+                  overlap and one from an LLM judge are not the same claim. */}
+              {openRun.metrics?.fitness && (
+                <div style={{ marginBottom: 14, fontSize: 11.5, color: "var(--ink-3)",
+                              fontFamily: "'JetBrains Mono', monospace", lineHeight: 1.7 }}>
+                  评分方式：{METRIC_LABEL[openRun.metrics.fitness.metric_mode ?? "heuristic"]}
+                  {openRun.metrics.fitness.metric_mode !== "heuristic" && (
+                    <> · 评审 {openRun.metrics.fitness.judge_calls ?? 0} 次
+                      （缓存命中 {openRun.metrics.fitness.cache_hits ?? 0}
+                      {(openRun.metrics.fitness.judge_failures ?? 0) > 0 && `，失败 ${openRun.metrics.fitness.judge_failures}`}）
+                      {openRun.metrics.fitness.capped && " · 已达评审上限"}
+                    </>
+                  )}
+                  {openRun.metrics.fitness.collusion_risk && (
+                    <div style={{ color: "var(--moon)" }}>
+                      ⚠ 评审模型与优化模型相同 —— 同一个模型有同样的盲点，评分可能偏松。
+                    </div>
+                  )}
+                </div>
+              )}
+
               {openRun.diff ? (
                 <pre style={{ margin: 0, fontFamily: "'JetBrains Mono', monospace", fontSize: 12, lineHeight: 1.6, whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
                   {openRun.diff.split("\n").map((ln, i) => (
@@ -254,15 +423,28 @@ export function HarnessEvolve() {
                   ))}
                 </pre>
               ) : (
-                <div style={{ fontSize: 13, color: "var(--ink-3)" }}>没有可显示的差异（可能进化未改动正文,或运行失败）。</div>
+                <div style={{ fontSize: 13, color: "var(--ink-3)" }}>
+                  {openRun.status === "failed" && !openRun.constraints
+                    ? "这次运行没有产出候选,详情见日志。"
+                    : "没有可显示的差异（可能进化未改动正文）。"}
+                </div>
               )}
             </div>
             <div style={{ padding: "14px 22px", borderTop: "1px solid var(--line)", display: "flex", gap: 12, alignItems: "center" }}>
               <button onClick={() => openLog(openRun)} style={{ height: 38, padding: "0 16px", borderRadius: 9, border: "1px solid var(--line-2)", background: "transparent", color: "var(--ink-2)", fontSize: 13, cursor: "pointer" }}>查看日志</button>
+              {refusal && (
+                <span style={{ fontSize: 12, color: "var(--seal)", maxWidth: 380, lineHeight: 1.5 }}>{refusal}</span>
+              )}
               {openRun.status === "done" && (
                 <div style={{ marginLeft: "auto", display: "flex", gap: 12 }}>
                   <button onClick={() => reject(openRun.id)} style={{ height: 38, padding: "0 18px", borderRadius: 9, border: "1px solid var(--line-2)", background: "transparent", color: "var(--ink-2)", fontSize: 13, cursor: "pointer" }}>弃用</button>
-                  <button onClick={() => accept(openRun.id)} style={{ height: 38, padding: "0 20px", borderRadius: 9, border: "none", background: "var(--seal)", color: "oklch(98% 0.01 85)", fontSize: 13.5, fontWeight: 600, cursor: "pointer", fontFamily: "'Noto Serif SC', serif" }}>采纳 · 写回技艺</button>
+                  {refusal ? (
+                    // Second step: the backend already said no once. Deploying
+                    // anyway stays possible — it just can't happen by accident.
+                    <button onClick={() => accept(openRun.id, true)} style={{ height: 38, padding: "0 20px", borderRadius: 9, border: "1px solid var(--seal)", background: "transparent", color: "var(--seal)", fontSize: 13.5, fontWeight: 600, cursor: "pointer", fontFamily: "'Noto Serif SC', serif" }}>确认强制采纳</button>
+                  ) : (
+                    <button onClick={() => accept(openRun.id)} style={{ height: 38, padding: "0 20px", borderRadius: 9, border: "none", background: "var(--seal)", color: "oklch(98% 0.01 85)", fontSize: 13.5, fontWeight: 600, cursor: "pointer", fontFamily: "'Noto Serif SC', serif" }}>采纳 · 写回技艺</button>
+                  )}
                 </div>
               )}
             </div>
