@@ -6,7 +6,7 @@ Vendored under `evolution/` so the desktop gateway can run skill evolution
 without requiring a user-side clone.
 
 Attribution for this component is recorded in the top-level `NOTICE` and
-`THIRD_PARTY_LICENSES/README.md`. The local patches below are Taiyi-AI-Lab's
+`THIRD_PARTY_LICENSES/README.md`. The local patches below are Dougo's
 work and are likewise MIT-licensed.
 
 Local patches (see git history):

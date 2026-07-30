@@ -27,4 +27,4 @@ into server/vendor/evolution/.
 
 Mo applies local modifications on top of this snapshot; they are documented in
 server/vendor/README.md and are likewise offered under the MIT License by
-Taiyi-AI-Lab.
+Dougo.

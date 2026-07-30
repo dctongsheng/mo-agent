@@ -17,7 +17,7 @@ compatible with this project's MIT license. Per the Apache-2.0 terms, the
 
 `server/vendor/evolution/` carries Mo-local modifications on top of the upstream
 snapshot; they are listed in [`server/vendor/README.md`](../server/vendor/README.md)
-and are released under the MIT License by Taiyi-AI-Lab.
+and are released under the MIT License by Dougo.
 
 ## Removed for license compliance
 

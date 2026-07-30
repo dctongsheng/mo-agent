@@ -12,7 +12,7 @@ function dlog(msg: string): void {
   } catch { /* ignore */ }
 }
 
-app.setPath("userData", path.join(app.getPath("appData"), "ai.taiyi.mo"));
+app.setPath("userData", path.join(app.getPath("appData"), "com.dougoos.mo"));
 
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) app.quit();

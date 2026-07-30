@@ -1,5 +1,5 @@
 Mo — Desktop Self-Evolving Agent
-Copyright (c) 2026 Taiyi-AI-Lab
+Copyright (c) 2026 Dougo
 Licensed under the MIT License (see LICENSE).
 
 ================================================================================
@@ -30,9 +30,9 @@ Nous Research and licensed under the MIT License.
     Full text:  server/vendor/evolution/LICENSE
 
 Mo carries local modifications on top of that snapshot (documented in
-server/vendor/README.md); those modifications are the work of Taiyi-AI-Lab and
+server/vendor/README.md); those modifications are the work of Dougo and
 are likewise released under the MIT License.
 
 Mo's own original components — the desktop gateway extensions
 (server/mo-gateway.py) and the desktop application (app/) — are the work of
-Taiyi-AI-Lab and are licensed under the MIT License.
+Dougo and are licensed under the MIT License.
